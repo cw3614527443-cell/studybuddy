@@ -113,6 +113,29 @@ class TaskRunner:
         self._edge_started = False
         self.bus.log("浏览器已关闭")
 
+    def shutdown(self, wait=8.0):
+        """退出程序时的收尾（v1.4.1）。
+
+        和 `close_browser()` 的关键区别：**绝不去 detach `self.browser`**。
+        那个 Playwright 对象属于任务线程，从别的线程（尤其退出时的主线程）去
+        `pw.stop()` 会卡住甚至报错；正确做法是只发停止信号，让任务线程在
+        `_wrap()` 的 finally 里自己收尾。
+
+        步骤：请求停止 → 最多等 wait 秒让任务线程收尾 → 关 Edge 进程。
+        Edge 优雅关闭（先 WM_CLOSE 让 cookie 落盘）本身要几秒，
+        所以调用方必须放到后台线程里跑，不能占着 GUI 主线程。
+        """
+        try:
+            self.bus.request_stop()
+        except Exception:
+            pass
+        t = self.thread
+        if t is not None and t.is_alive():
+            t.join(timeout=wait)
+        self.browser = None          # 不碰别人线程的对象，交给进程退出去清理
+        EdgeProc.kill(grace=3, force_any=True)
+        self._edge_started = False
+
     # ---------- 业务动作（供 GUI 调用） ----------
     def action_open_site(self, site_home, attach=False):
         br = self.ensure_browser()
