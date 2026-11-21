@@ -166,24 +166,31 @@ StudyBuddy/
 ├── main.py                入口（含 --selftest 无头自检）
 ├── config.py              路径、站点、端口、数据目录解析
 ├── core/
-│   ├── browser.py         Edge 进程管理 + CDP 连接 + 截图 + 弹窗识别
+│   ├── browser.py         Edge 进程管理 + CDP 连接 + 截图 + 页面看门狗（静音/弹窗）
 │   ├── events.py          事件总线
 │   ├── tasks.py           任务编排（线程池 + 停止控制）
+│   ├── kinds.py           资源分类（视频 / 文档 / 题目 / 其他）
+│   ├── llm.py             OpenAI 兼容大模型客户端（自动答题用）
+│   ├── changelog.py       内置「关于 / 更新日志」数据
 │   └── platforms/
 │       ├── ai_icve.py     AI 优课适配器
-│       └── zjy2.py        zjy2 适配器
+│       ├── zjy2.py        zjy2 适配器
+│       └── quiz_ai.py     作业 / 测验 / 考试的读题、作答、提交
 ├── ui/
 │   ├── app.py             主界面（布局与交互）
-│   └── widgets.py         自绘控件：圆角卡片 / 导航项 / 分段选择器 / 进度条
+│   ├── widgets.py         自绘控件：圆角卡片 / 导航项 / 分段选择器 / 进度条
+│   ├── about.py           「关于此软件」窗口（概览 + 更新日志）
+│   └── llm_settings.py    大模型设置窗口
 ├── installer/
 │   ├── studybuddy.iss     Inno Setup 安装脚本
 │   └── installed.flag     安装版标记（由安装器写入程序目录）
 ├── assets/                应用图标（icon.ico 7 档尺寸）
 ├── tools/make_icon.py     图标生成脚本（纯几何绘制，不依赖字体）
-├── tools/shot_ui.py       界面截图脚本（开发期比对视觉用）
-├── tests/                 回归测试（重连 / 拖进度条 / 续播弹窗）
+├── tools/shot_ui.py       主界面截图脚本（开发期比对视觉用）
+├── tools/shot_about.py    关于窗口截图脚本
+├── tests/                 回归测试（zjy2 DOM / 页面看门狗 / 题目解析 / 模型答案解析）
 ├── build.spec             PyInstaller 配置
-├── CHANGELOG.md           更新历史
+├── CHANGELOG.md           更新历史（工程记录）
 └── 启动.bat / 打包.bat
 ```
 
@@ -220,7 +227,11 @@ StudyBuddy/
 
 ## 开发
 
-版本号在 `config.py` 的 `APP_VERSION`，每次改动需同步写入 `CHANGELOG.md`。
+版本号在 `config.py` 的 `APP_VERSION`。每次发版要同步三处，缺一处就会前后不一致：
+
+1. `config.py` → `APP_VERSION`（界面标题、关于窗口都用它）
+2. `core/changelog.py` → `RELEASES` 顶部加一条（**使用者视角**，一句话说清改了什么）
+3. `CHANGELOG.md` → 加一节（**开发者视角**，写根因、解法、验证项）
 
 ### 界面
 

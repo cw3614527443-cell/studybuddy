@@ -129,8 +129,10 @@ class App:
         self.btn_help = W.NavButton(bottom, text="看不懂？功能说明", kind="link",
                                     command=self.on_help, height=30)
         self.btn_help.pack(fill="x")
-        tk.Label(bottom, text=f"v{APP_VERSION}", bg=W.CARD, fg=W.TEXT_MUT,
-                 font=W.font(8)).pack(anchor="w", padx=p(16), pady=(p(4), 0))
+        # 版本号兼作入口：点开「关于此软件」看开发信息与更新日志
+        self.btn_about = W.NavButton(bottom, text=f"关于此软件 · v{APP_VERSION}",
+                                     kind="link", command=self.on_about, height=30)
+        self.btn_about.pack(fill="x")
 
         # 侧栏留白太多，用一块淡色提示填空，顺带交代两条容易踩的坑
         tip = W.RoundedCanvas(bar, radius=10, fill="#F7F8FC", outline="", line_width=0,
@@ -388,6 +390,21 @@ class App:
     def on_settings(self):
         from ui.llm_settings import LLMSettingsDialog
         LLMSettingsDialog(self.root, on_saved=self._on_llm_saved)
+
+    def on_about(self):
+        """关于窗口：版本、开发信息、更新日志。任务运行中也允许打开。"""
+        from ui.about import AboutDialog
+        existing = getattr(self, "_about", None)
+        if existing is not None:
+            try:
+                if existing.top.winfo_exists():     # 已经开着就提到前面，不再开第二个
+                    existing.top.deiconify()
+                    existing.top.lift()
+                    existing.top.focus_force()
+                    return
+            except Exception:
+                pass
+        self._about = AboutDialog(self.root)
 
     def _on_llm_saved(self, cfg):
         self._append_log({"time": "", "msg": f"大模型设置已保存：{cfg.get('model', '')}",
