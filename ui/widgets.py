@@ -160,6 +160,7 @@ class NavButton(RoundedCanvas):
         danger —— 危险操作（停止任务）
         mini   —— 卡片右上角的小按钮
         link   —— 文字链接
+        primary—— 主色实心按钮（对话框里的「保存」这类）
     """
 
     def __init__(self, master, text="", command=None, number=None, kind="nav",
@@ -217,6 +218,10 @@ class NavButton(RoundedCanvas):
             if dis:
                 return None, "#C6CCD8"
             return (RED_SOFT if hov else None), RED
+        if self._kind == "primary":
+            if dis:
+                return "#C6CCD8", "#FFFFFF"
+            return (ACCENT_HOVER if hov else ACCENT), "#FFFFFF"
         if self._kind == "link":
             return None, (ACCENT_HOVER if hov else ACCENT)
         if self._kind == "mini":
@@ -273,7 +278,7 @@ class NavButton(RoundedCanvas):
             self.create_text(s(48), cy, text=self._text, anchor="w", fill=fg, font=font(10))
         elif self._kind == "mini":
             self.create_text(w / 2, h / 2, text=self._text, fill=fg, font=font(9))
-        elif self._kind == "link":
+        elif self._kind in ("link", "primary"):
             self.create_text(w / 2, h / 2, text=self._text, fill=fg, font=font(9))
         else:
             self.create_text(s(16), h / 2, text=self._text, anchor="w", fill=fg,

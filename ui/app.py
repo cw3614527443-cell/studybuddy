@@ -102,6 +102,7 @@ class App:
             ("brush", "刷课（一键过完）", 3, self.on_brush),
             ("watch", "刷观看时长", 4, self.on_watch),
             ("verify", "复核完成情况", 5, self.on_verify),
+            ("quiz", "自动答题（大模型）", 6, self.on_quiz),
         ]
         for key, label, num, cmd in items:
             b = W.NavButton(bar, text=label, number=num, command=cmd, height=42)
@@ -122,8 +123,11 @@ class App:
         # 底部
         bottom = tk.Frame(bar, bg=W.CARD)
         bottom.pack(side="bottom", fill="x", padx=p(12), pady=(0, p(14)))
+        self.btn_settings = W.NavButton(bottom, text="⚙ 大模型设置", kind="link",
+                                        command=self.on_settings, height=30)
+        self.btn_settings.pack(fill="x")
         self.btn_help = W.NavButton(bottom, text="看不懂？功能说明", kind="link",
-                                    command=self.on_help, height=32)
+                                    command=self.on_help, height=30)
         self.btn_help.pack(fill="x")
         tk.Label(bottom, text=f"v{APP_VERSION}", bg=W.CARD, fg=W.TEXT_MUT,
                  font=W.font(8)).pack(anchor="w", padx=p(16), pady=(p(4), 0))
@@ -377,7 +381,38 @@ class App:
         self.note_label.config(text=info.get("desc", ""))
         if not self.runner.is_running():
             ai = self.platform_var.get() == "ai"
+            # zjy2 没有学时统计、题目页也还没适配 → 这两项在 zjy2 下置灰
             self._nav["watch"].config(state="normal" if ai else "disabled")
+            self._nav["quiz"].config(state="normal" if ai else "disabled")
+
+    def on_settings(self):
+        from ui.llm_settings import LLMSettingsDialog
+        LLMSettingsDialog(self.root, on_saved=self._on_llm_saved)
+
+    def _on_llm_saved(self, cfg):
+        self._append_log({"time": "", "msg": f"大模型设置已保存：{cfg.get('model', '')}",
+                          "level": "ok"})
+
+    def on_quiz(self):
+        from config import llm_config
+        cfg = llm_config()
+        if not (cfg.get("base") and cfg.get("key") and cfg.get("model")):
+            if messagebox.askyesno(
+                    "还没配置大模型",
+                    "自动答题是软件自己去调大模型，需要你填接口地址和 API Key。\n"
+                    "现在去填吗？"):
+                self.on_settings()
+            return
+        ans = messagebox.askyesnocancel(
+            "自动答题",
+            "是：正式作答，并按设置提交\n"
+            "否：试运行（只解析题目、显示答案，不点选也不提交）\n\n"
+            "第一次用建议先试运行，核对题目和答案能对上再正式跑。")
+        if ans is None:
+            return
+        dry = (ans is False)
+        self._run(lambda: self.runner.action_answer_quiz(
+            self.platform_var.get(), self.course_var.get(), dry_run=dry), nav="quiz")
 
     def on_help(self):
         messagebox.showinfo(
@@ -401,6 +436,11 @@ class App:
             "    浏览器窗口要保持开着（可以最小化），关掉就中断。\n\n"
             "⑤ 复核完成情况\n"
             "    统计目录里已完成 / 总数，用来确认刷课结果。\n\n"
+            "⑥ 自动答题（大模型）\n"
+            "    自动进「作业 / 测验 / 考试」，读题 → 大模型作答 → 点选填空 → 提交，\n"
+            "    提交后会把得分记进日志。需要先在「⚙ 大模型设置」里填接口和 Key（用你自己的）。\n"
+            "    第一次用请选「试运行」：只解析题目和答案、不点不交，核对无误再正式跑。\n"
+            "    考试默认不参与（限时且交卷不可改），要跑考试需在设置里勾选。\n\n"
             "【平台怎么选】看浏览器地址栏：\n"
             "    ai.icve.com.cn    → 选「AI 优课」。卡片式首页，有学时统计。\n"
             "    zjy2.icve.com.cn  → 选「zjy2」。树形目录，资源后面带百分比。\n"
@@ -423,6 +463,7 @@ class App:
             b.config(state=state)
         self.btn_close.config(state=state)
         self.btn_help.config(state=state)
+        self.btn_settings.config(state=state)
         self.btn_stop.config(state="normal" if busy else "disabled")
         if not busy:
             for b in self._nav.values():
