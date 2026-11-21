@@ -30,10 +30,12 @@ def window_rect(root):
 
 def main():
     out = sys.argv[1] if len(sys.argv) > 1 else "shot_ui.png"
+    platform = sys.argv[2] if len(sys.argv) > 2 else "ai"      # ai / zjy2，看平台卡排版
     dpi_aware()
     root = tk.Tk()
     app = App(root)
     root.attributes("-topmost", True)
+    app._on_platform_change(platform)
 
     demo = [
         ("17:00:48", "启动受控浏览器（首次需在弹出的窗口里登录）…", "info"),

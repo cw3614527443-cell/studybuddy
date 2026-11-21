@@ -234,7 +234,10 @@ _GUARD_JS = r"""
 
   // ---------- 续播弹窗 ----------
   // 只认「上次播放 / 是否继续」这一类询问框，别的弹窗一律不碰（防止误点确认按钮）
-  const HINT = /上次播放|是否继续|继续上次|未播放完|上次未完成|断点续播|继续观看/;
+  // v1.4.3：文档（PPT/PDF）的续播文案是「上次观看到第23页，是否继续观看？」，
+  // 按钮是「确定 / 取消」，和视频那套不一样，之前整类漏掉。
+  const DOC_HINT = /上次观看到|上次阅读到|上次浏览到/;
+  const HINT = /上次播放|是否继续|继续上次|未播放完|上次未完成|断点续播|继续观看|上次观看到|上次阅读到|上次浏览到/;
   const BTN = 'button,[role="button"],a,.ivu-btn,.el-button,[class*="btn"],[class*="Btn"],[class*="button"]';
 
   const visible = (e) => {
@@ -246,7 +249,8 @@ _GUARD_JS = r"""
   };
 
   // 从按钮往上找，最近的一个「高 z-index 浮层」里是否含续播文案
-  const hintDialog = (el) => {
+  const hintDialog = (el, re) => {
+    const pattern = re || HINT;
     let p = el, i = 0;
     while (p && i++ < 12) {
       let st;
@@ -255,7 +259,7 @@ _GUARD_JS = r"""
         const z = parseInt(st.zIndex, 10) || 0;
         if (z >= 50) {
           const t = (p.innerText || '').trim();
-          if (t && t.length < 400 && HINT.test(t)) return p;
+          if (t && t.length < 400 && pattern.test(t)) return p;
         }
       }
       p = p.parentElement;
@@ -263,7 +267,7 @@ _GUARD_JS = r"""
     return null;
   };
 
-  const findBtn = (label) => {
+  const findBtn = (label, re) => {
     let best = null, all;
     try { all = document.querySelectorAll(BTN); } catch (e) { return null; }
     for (const e of all) {
@@ -272,7 +276,7 @@ _GUARD_JS = r"""
       if (!visible(e)) continue;
       if (e.disabled) continue;
       if (/disabled/i.test(String(e.className || ''))) continue;
-      if (!hintDialog(e)) continue;
+      if (!hintDialog(e, re)) continue;
       if (!best) { best = e; continue; }
       if (best.contains && best.contains(e)) best = e;   // 取最内层，别点外层容器
     }
@@ -289,6 +293,15 @@ _GUARD_JS = r"""
       if (!b) continue;
       try { b.click(); } catch (e) { continue; }
       G.modal++; G.lastModal = label; G.lastAt = now;
+      lastClick = now;
+      return true;
+    }
+    // 文档类续播：只有浮层里明确写了「上次观看到第X页」才点「确定」，
+    // 普通公告里的「确定」绝不能点（DOC_HINT 不匹配就不会命中）。
+    const docBtn = findBtn('确定', DOC_HINT) || findBtn('继续观看', DOC_HINT);
+    if (docBtn) {
+      try { docBtn.click(); } catch (e) { return false; }
+      G.modal++; G.lastModal = '确定（文档续播）'; G.lastAt = now;
       lastClick = now;
       return true;
     }
@@ -640,3 +653,20 @@ class Browser:
             return self.page.url
         except Exception:
             return ""
+
+    def on_login_page(self):
+        """当前是否被踢回统一登录页（登录态过期）。
+
+        v1.4.2：读进度/复核时如果掉登录，页面既没有「观看时长」也没有课程卡片，
+        以前会被当成「这门课不计学时」「目录里没读到资源」，让人往错的方向排查。
+        """
+        try:
+            u = (self.page.url or "").lower()
+        except Exception:
+            u = ""
+        if "sso.icve.com.cn" in u or "auth_v2" in u or "/login" in u:
+            return True
+        try:
+            return "欢迎登录" in self.text()[:400]
+        except Exception:
+            return False

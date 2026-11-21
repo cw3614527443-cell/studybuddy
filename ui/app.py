@@ -28,14 +28,15 @@ class App:
             "host": "ai.icve.com.cn",
             "desc": "卡片式首页，卡片上显示「观看时长 / 学习次数」。\n"
                     "刷课＝视频拖到末尾、文档翻到末页；刷时长＝真实播放累计学时。\n"
-                    "刷课时自动静音，续播弹窗自动关；测验/作业需自己作答。",
+                    "个别课程不计学时，点②会自动改读目录完成度。\n"
+                    "刷课时自动静音、续播弹窗自动关；测验/作业需自己作答。",
         },
         "zjy2": {
             "host": "zjy2.icve.com.cn",
-            "desc": "左侧是「章节 → 小节 → 资源」树形目录，资源后面跟着百分比。\n"
-                    "只支持刷课（视频拖到末尾 / 文档翻到末页），这个平台没有学时统计。\n"
+            "desc": "左侧「章节 → 小节 → 资源」树，资源后带百分比；只支持刷课。\n"
+                    "这个平台没有学时统计，点②读的是目录完成度（已完成 / 总数）。\n"
                     "网速慢时会先等页面加载完再动手，日志里会显示「继续等…」。\n"
-                    "刷课时自动静音，续播弹窗自动关；测验/作业需自己作答。",
+                    "刷课时自动静音、续播弹窗自动关；测验/作业需自己作答。",
         },
     }
 
@@ -105,7 +106,7 @@ class App:
 
         items = [
             ("open", "启动浏览器 / 登录", 1, self.on_open_site),
-            ("read", "读取观看时长", 2, self.on_read_time),
+            ("read", "读取学习进度", 2, self.on_read_time),
             ("brush", "刷课（一键过完）", 3, self.on_brush),
             ("watch", "刷观看时长", 4, self.on_watch),
             ("verify", "复核完成情况", 5, self.on_verify),
@@ -195,7 +196,7 @@ class App:
         self.chip.pack(side="right", pady=(p(4), 0))
 
         # ---- 平台卡 ----
-        pcard = W.Card(inner, height=178, pad=(18, 14))
+        pcard = W.Card(inner, height=196, pad=(18, 14))
         pcard.pack(fill="x", pady=(p(14), 0))
         body = pcard.body
         row = tk.Frame(body, bg=W.CARD)
@@ -447,8 +448,10 @@ class App:
             "① 启动浏览器 / 登录\n"
             "    拉起一个受控的 Edge 窗口。第一次用要在里面扫码登录学习平台；\n"
             "    登录一次后，只要不点「关闭浏览器」，下次打开仍在登录状态。\n\n"
-            "② 读取观看时长\n"
-            "    读取首页的「观看时长 / 学习次数」（仅 AI 优课有这项统计）。\n\n"
+            "② 读取学习进度\n"
+            "    AI 优课先读首页的「观看时长 / 学习次数」；如果这门课不计学时\n"
+            "    （页面上没有这项数字），会自动改为统计目录里的刷课完成度。\n"
+            "    zjy2 没有学时统计，直接读目录完成度（已完成 / 总数）。\n\n"
             "③ 刷课（一键过完）\n"
             "    把目录里未完成的资源逐个打开：视频直接把进度条拖到末尾，\n"
             "    文档翻到最后一页。不耗真实观看时间，速度快。\n"
@@ -456,7 +459,9 @@ class App:
             "    这是在等加载，不是卡住；每项都会确认进度真的到 100% 才报完成。\n"
             "    若该课程已全部完成，会直接提示「无需刷课」。\n"
             "    · 全程自动静音，浏览器不会出声（任务结束后声音控制权还给你）；\n"
-            "    · 「检测到上次播放…是否继续？」这类弹窗会自动点掉，日志会记一行；\n"
+            "    · 视频的「检测到上次播放…是否继续？」和文档的「上次观看到第X页…」\n"
+            "      两类续播弹窗都会自动点掉，日志会记一行；\n"
+            "    · 连续 2 项进度都没涨会自动停止，不会在 0% 状态下白刷整门课；\n"
             "    · 目录里的测验 / 作业 / 考试**不会自动作答**，会列出来提醒你自己做。\n\n"
             "④ 刷观看时长\n"
             "    按目标学时真实播放视频（静音播放）。这一步不能拖进度条，拖了平台不计时长。\n"
@@ -515,7 +520,8 @@ class App:
         self._run(job, nav="open")
 
     def on_read_time(self):
-        self._run(lambda: self.runner.action_read_time(self.platform_var.get()), nav="read")
+        self._run(lambda: self.runner.action_read_time(self.platform_var.get(),
+                                                       self.course_var.get()), nav="read")
 
     def on_brush(self):
         self._run(lambda: self.runner.action_brush_course(self.platform_var.get(),

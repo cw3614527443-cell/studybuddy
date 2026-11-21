@@ -44,8 +44,11 @@ class AiIcve:
     def _stopped(self):
         return self.bus.should_stop() if self.bus else False
 
-    def read_watch(self, timeout=20, stop_grace=15, ignore_stop=False):
+    def read_watch(self, timeout=20, stop_grace=15, ignore_stop=False, quiet=False):
         """读取首页观看时长(小时)与学习次数。会导航到首页，故仅在未播放时调用。
+
+        quiet=True：读不到时不说「可能掉登录或平台改版」。有些课程本身就没有
+        学时统计，调用方会改读课程完成度，此时这句告警会误导人。
 
         - 页面是 SPA，刚 load 完数字区块可能还没渲染，固定等待容易读到 None → 轮询。
         - v1.0.2：用户点「停止」后不再立刻放弃，而是再给 stop_grace 秒把数字读出来。
@@ -66,6 +69,10 @@ class AiIcve:
                     h = float(m.group(1))
                     n = re.search(r"学习次数\s*(\d+)\s*次", t)
                     return h, (int(n.group(1)) if n else None)
+                if self.br.on_login_page():
+                    # 掉登录时首页根本没有数字区块，再等下去只会等满 30 秒
+                    self._log("登录状态已失效：当前停在平台登录页", "error")
+                    return None, None
                 if self._stopped() and not ignore_stop:
                     if stop_deadline is None:
                         stop_deadline = time.time() + stop_grace
@@ -75,14 +82,16 @@ class AiIcve:
                 self.br.wait(1000)
             if attempt == 2:
                 break
-            self._log("首页数字区块未渲染，刷新一次重试…", "warn")
+            if not quiet:
+                self._log("首页数字区块未渲染，刷新一次重试…", "warn")
             try:
                 self.br.reload()
             except Exception:
                 pass
             self.br.wait(2000)
-        self._log("读取观看时长失败：页面始终没有出现「观看时长」数字，"
-                  "可能掉登录或平台改版。已播放的学时平台已经记录，重开浏览器点②即可刷新", "warn")
+        if not quiet:
+            self._log("读取观看时长失败：页面始终没有出现「观看时长」数字，"
+                      "可能掉登录或平台改版。已播放的学时平台已经记录，重开浏览器点②即可刷新", "warn")
         return None, None
 
     def read_watch_inplace(self):
