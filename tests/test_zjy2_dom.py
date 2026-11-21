@@ -11,6 +11,7 @@
 import os
 import sys
 import tempfile
+import time
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -40,12 +41,16 @@ HTML = """<!doctype html><html><head><meta charset="utf-8">
         <span class="name">第一章导学.mp4</span><span class="ziProgress">进度:100%</span>
         <i class="checkmark wc"></i>
       </div>
+      <div class="fwenjianjia" id="r3">
+        <span class="name">第三章总结.mp4</span><span class="ziProgress">已学完</span>
+      </div>
     </div>
   </div>
 </div>
 <div id="content">
   <div class="tab active">第一章导学.mp4</div>
   <div class="docname">第一章导学.mp4</div>
+  <div id="pages"></div>
   <!-- 新的播放器（可见） -->
   <video id="v_new"></video>
   <!-- 上一个资源遗留的播放器（隐藏，仍然存在 DOM 里） -->
@@ -103,12 +108,14 @@ def main():
         # 1. 只枚举叶子资源，父节点不算
         items = z.list_resources()
         names = [x["name"] for x in items]
-        ok &= check("list_resources 只返回叶子节点", names == ["第一章助学.docx", "第一章导学.mp4"], str(names))
+        ok &= check("list_resources 只返回叶子节点",
+                    names == ["第一章助学.docx", "第一章导学.mp4", "第三章总结.mp4"], str(names))
 
         # 2. 进度百分比解析
         pcts = {x["name"]: x["pct"] for x in items}
         ok &= check("进度解析 0% / 100%",
                     pcts.get("第一章助学.docx") == 0 and pcts.get("第一章导学.mp4") == 100, str(pcts))
+        ok &= check("「已学完」这类无数字进度算 100", pcts.get("第三章总结.mp4") == 100, str(pcts))
 
         # 3. 按 id 回读进度
         ok &= check("progress_of 回读指定节点", z.progress_of("r2") == 100,
@@ -152,10 +159,84 @@ def main():
             const n = document.getElementById('r1');
             n.querySelector('.name').addEventListener('click', () => {
                 document.querySelector('.docname').textContent = '第一章助学.docx';
+                document.querySelector('#pages').textContent = '1 / 3';
             });
         }""")
         opened = z.open_resource({"id": "r1", "name": "第一章助学.docx"}, retries=2, wait=2.0)
         ok &= check("内容切换后 open_resource 返回 True", opened is True)
+
+        # 11. 慢网：点了之后只弹出加载遮罩、内容还是旧的 -> 不能开始刷
+        page.evaluate("""() => {
+            const c = document.getElementById('content');
+            const mask = document.createElement('div');
+            mask.id = 'mask';
+            mask.className = 'el-loading-mask';
+            mask.textContent = '加载中…';
+            mask.style.cssText = 'position:absolute;left:0;top:0;right:0;bottom:0;background:#fff;z-index:9;pointer-events:none';
+            c.appendChild(mask);
+            document.querySelector('#pages').textContent = '';
+            document.querySelector('.docname').textContent = '第一章助学.docx';
+            document.querySelector('.tab').textContent = '第一章助学.docx';
+        }""")
+        st = z._content_state()
+        ok &= check("识别出加载遮罩", st.get("loading") is True, str(st.get("loading")))
+        ok &= check("加载中不判定为就绪", z._ready_kind(st)[1] is False)
+        res = z._learn_current("第一章助学.docx")
+        ok &= check("加载中绝不启动刷课", res["ok"] is False and res["kind"] == "", str(res))
+
+        # 12. 遮罩还在的时候，open_resource 不许返回 True（哪怕标签已经变了）
+        t0 = time.time()
+        bad = z.open_resource({"id": "r1", "name": "第一章助学.docx"}, retries=1, wait=1.2)
+        ok &= check("加载没完时 open_resource 返回 False", bad is False,
+                    f"{time.time() - t0:.1f}s")
+
+        # 13. 遮罩消失、页码出现后才算打开（模拟慢网 1.2 秒才加载完）
+        page.evaluate("""() => {
+            const n = document.getElementById('r1');
+            n.querySelector('.name').addEventListener('click', () => {
+                document.querySelector('#pages').textContent = '';
+                let mask = document.getElementById('mask');
+                if (!mask) {
+                    const c = document.getElementById('content');
+                    mask = document.createElement('div');
+                    mask.id = 'mask';
+                    mask.className = 'el-loading-mask';
+                    mask.style.cssText = 'position:absolute;left:0;top:0;right:0;bottom:0;background:#fff;z-index:9;pointer-events:none';
+                    c.appendChild(mask);
+                }
+                setTimeout(() => {
+                    const m = document.getElementById('mask');
+                    if (m) m.remove();
+                    document.querySelector('.docname').textContent = '第一章助学.docx';
+                    document.querySelector('#pages').textContent = '1 / 3';
+                }, 1200);
+            });
+        }""")
+        t0 = time.time()
+        good = z.open_resource({"id": "r1", "name": "第一章助学.docx"}, retries=2, wait=10)
+        dt = time.time() - t0
+        ok &= check("慢网加载完后 open_resource 返回 True", good is True, f"{dt:.1f}s")
+        ok &= check("确实是等加载完才继续（>=1 秒）", dt >= 1.0, f"{dt:.1f}s")
+
+        # 14. 视频：元数据没到（duration=0）不算就绪，到了才算
+        page.evaluate("""() => {
+            const v = document.createElement('video');
+            v.id = 'vslow';
+            v.style.cssText = 'width:520px;height:300px;display:block';
+            Object.defineProperty(v, 'duration', {get: () => window.__dur || 0});
+            Object.defineProperty(v, 'readyState', {get: () => window.__rs || 0});
+            Object.defineProperty(v, 'currentSrc', {get: () => 'https://x/slow.mp4'});
+            document.getElementById('content').appendChild(v);
+            document.querySelector('#pages').textContent = '';   // 只留视频，避免判成文档
+            window.__rs = 0; window.__dur = 0;
+        }""")
+        st = z._content_state()
+        ok &= check("视频没拿到时长时不算就绪", z._ready_kind(st) == ("", False),
+                    str(z._ready_kind(st)))
+        page.evaluate("() => { window.__rs = 4; window.__dur = 120; }")
+        st = z._content_state()
+        ok &= check("拿到时长后判定为可刷视频", z._ready_kind(st) == ("video", True),
+                    str(z._ready_kind(st)))
 
         browser.close()
 
