@@ -9,6 +9,8 @@ v1.2.0 重做视觉：自绘圆角卡片 + 左侧导航 + 深色日志面板，�
 所有视觉元素由 ui/widgets.py 自绘，不依赖 ttk 系统主题。
 """
 import os
+import threading
+import time
 import tkinter as tk
 from tkinter import messagebox
 
@@ -44,6 +46,11 @@ class App:
         self._last_shot = None
         self._icon_img = None
         self._nav = {}
+        self._closing = False          # 正在退出：窗口已收起，等后台收尾
+        self._shutdown_done = None
+        self._shutdown_deadline = 0.0
+        self._destroyed = False
+        self._pump_started = False
 
         W.init_scale(root)                      # 必须在建控件前定下缩放比
         root.title(f"{APP_NAME} v{APP_VERSION}")
@@ -316,6 +323,9 @@ class App:
 
     # ------------------------------------------------------------ 事件循环
     def _poll_bus(self):
+        if self._closing:
+            self._start_pump()
+            return
         try:
             for kind, data in self.bus.poll():
                 if kind == "log":
@@ -534,12 +544,62 @@ class App:
         self._run(job)
 
     def on_close(self):
+        """退出程序（v1.4.1）。
+
+        旧的实现直接在 GUI 主线程里 `close_browser()`：它要等 Edge 优雅退出
+        （先 WM_CLOSE 让 cookie 落盘，再等端口消失，必要时强杀），总共几秒到
+        十几秒。主线程被占住，Windows 就把窗口标成「未响应」，然后才消失 ——
+        用户看到的就是「点×卡住，过一会儿自己关了」。
+
+        现在改成：先 `withdraw()` 把窗口收起（视觉上立刻关闭），
+        收尾放到后台线程，主线程继续用 `after` 轮询，完成后再真正 destroy。
+        代价是进程会在后台多活几秒（无窗口），换来点击即可关闭的观感。
+        """
+        if self._closing:
+            return
         if self.runner.is_running():
-            if not messagebox.askyesno("确认退出", "任务正在运行，确定退出吗？"):
+            if not messagebox.askyesno(
+                    "确认退出",
+                    "任务正在运行，确定退出吗？\n"
+                    "未完成的资源会保持原状，下次可以接着刷。"):
                 return
-            self.runner.stop()
+        self._closing = True
+        self._shutdown_done = threading.Event()
+        self._shutdown_deadline = time.time() + 25      # 兜底：卡住也要退出去
         try:
-            self.runner.close_browser()
+            self._set_status("正在退出…", "run")
+            self.root.withdraw()
         except Exception:
             pass
-        self.root.destroy()
+        threading.Thread(target=self._shutdown_worker, daemon=True).start()
+        self._start_pump()
+
+    def _shutdown_worker(self):
+        """后台收尾：停任务 → 关 Edge。UI 线程绝不碰 Playwright 对象。"""
+        try:
+            self.runner.shutdown()
+        except Exception:
+            pass
+        finally:
+            if self._shutdown_done is not None:
+                self._shutdown_done.set()
+
+    def _start_pump(self):
+        """只起一条轮询链：先 destroy 再被排队的回调，会报「invalid command name」。"""
+        if self._pump_started or self._destroyed:
+            return
+        self._pump_started = True
+        self.root.after(120, self._pump_shutdown)
+
+    def _pump_shutdown(self):
+        if self._destroyed:
+            return
+        done = self._shutdown_done is None or self._shutdown_done.is_set()
+        if done or time.time() >= self._shutdown_deadline:
+            self._destroyed = True
+            try:
+                self.root.destroy()
+            except Exception:
+                pass
+            return
+        self.root.after(120, self._pump_shutdown)
