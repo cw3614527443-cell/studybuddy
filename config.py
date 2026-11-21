@@ -72,7 +72,52 @@ DEFAULT_TARGET_HOURS = 5.0
 CDP_PORT = int(os.environ.get("SB_CDP_PORT") or 9222)
 
 APP_NAME = "StudyBuddy 学习助手"
-APP_VERSION = "1.2.3"
+APP_VERSION = "1.3.0"
+
+
+# ---------------------------------------------------------------------------
+# 大模型设置（自动答题用）
+# ---------------------------------------------------------------------------
+# 为什么不内置 Key：这个工具是发给别人用的，内置 Key 等于把你的额度公开，
+# 几天就会被刷光。所以做成「使用者在设置页填自己的 Key」，
+# 接口按 OpenAI 兼容协议写，DeepSeek / 通义 / Kimi / 豆包 / OpenAI 都能用。
+SETTINGS_PATH = os.path.join(DATA_DIR, "settings.json")
+
+DEFAULT_LLM = {
+    "base": "https://api.deepseek.com/v1",
+    "model": "deepseek-chat",
+    "key": "",
+    "timeout": 90,
+}
+
+
+def load_settings():
+    """读设置；文件不存在或损坏时返回默认值（不让程序起不来）。"""
+    import json
+    data = {}
+    try:
+        with open(SETTINGS_PATH, "r", encoding="utf-8") as f:
+            data = json.load(f) or {}
+    except Exception:
+        data = {}
+    llm = dict(DEFAULT_LLM)
+    llm.update({k: v for k, v in (data.get("llm") or {}).items() if v is not None})
+    return {"llm": llm}
+
+
+def save_settings(settings):
+    """写设置（仅本机，明文保存 Key，界面上要提示这一点）。"""
+    import json
+    try:
+        with open(SETTINGS_PATH, "w", encoding="utf-8") as f:
+            json.dump(settings, f, ensure_ascii=False, indent=2)
+        return True
+    except Exception:
+        return False
+
+
+def llm_config():
+    return load_settings()["llm"]
 
 
 def resource_path(rel):

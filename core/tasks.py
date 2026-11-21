@@ -204,6 +204,65 @@ class TaskRunner:
             self.bus.log("时长数字没变化：平台按分钟结算，播放满 1 分钟后才会刷新，稍后点②再看", "warn")
         return f"{start} → {end} 时"
 
+    def action_answer_quiz(self, platform="ai", course_name="大学生心理健康", dry_run=False):
+        """自动答题：软件自己调大模型读题作答（Key 来自「⚙ 大模型设置」）。"""
+        from config import llm_config
+        from core.llm import LLMClient
+        from core.platforms.quiz_ai import QuizAI, NAV
+
+        cfg = llm_config()
+        br = self.ensure_browser()
+        br.install_guards(prefer_resume=True)
+
+        if platform != "ai":
+            self.bus.log("自动答题目前只支持「AI 优课」。zjy2 的测验页结构还没适配，"
+                         "先别用，免得乱提交", "warn")
+            return "zjy2 暂不支持自动答题"
+
+        llm = LLMClient(cfg.get("base"), cfg.get("key"), cfg.get("model"),
+                        cfg.get("timeout", 90))
+        if not llm.ready():
+            self.bus.log("还没配置大模型：点左下角「⚙ 大模型设置」，填接口地址 / Key / 模型名", "error")
+            return "未配置大模型"
+
+        if not AiIcve(br, self.bus).enter_course(course_name):
+            self.bus.log(f"进入课程「{course_name}」失败，无法开始答题", "error")
+            return "进入课程失败"
+
+        kinds = ["work", "test"]
+        if cfg.get("include_exam"):
+            kinds.append("exam")
+        auto_submit = bool(cfg.get("auto_submit", True)) and not dry_run
+
+        quiz = QuizAI(br, self.bus, llm)
+        quiz.course = course_name
+
+        def cb(i, n, name):
+            self.bus.progress(int(i / max(1, n) * 100), f"{i}/{n} {name}")
+
+        self.bus.log(
+            f"自动答题：{'试运行（只解析不提交）' if dry_run else '正式作答'}"
+            f" · 范围 {' / '.join(NAV[k] for k in kinds)}"
+            f" · {'自动提交' if auto_submit else '填完不提交，留给你确认'}")
+
+        res = quiz.run(kinds=tuple(kinds), auto_submit=auto_submit,
+                       dry_run=dry_run, progress_cb=cb)
+        self.bus.progress(100, "答题结束")
+
+        if dry_run:
+            n = len(res.get("items") or [])
+            if not n:
+                self.bus.log("没有需要作答的条目（作业/测验都已全部完成）")
+                return "无需作答"
+            self.bus.log(f"试运行结束：预览了 {n} 项，页面上未做任何点选和提交")
+            return f"试运行 {n} 项"
+
+        if not res.get("todo"):
+            self.bus.log("没有需要作答的条目（作业/测验都已全部完成）")
+            return "无需作答"
+        self.bus.log(f"答题结束：提交 {res.get('ok', 0)}/{res['todo']} 项")
+        return f"提交 {res.get('ok', 0)}/{res['todo']} 项"
+
     def action_verify(self, platform="ai", course_name="大学生心理健康"):
         br = self.ensure_browser()
         br.install_guards(prefer_resume=True)
