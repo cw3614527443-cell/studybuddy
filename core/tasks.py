@@ -54,6 +54,10 @@ class TaskRunner:
             # 关键：任务线程结束前必须断开本线程的连接，否则下一次复用会 TargetClosedError
             if self.browser is not None:
                 try:
+                    self.browser.release_guards()   # 结算「自动关弹窗/静音」日志并解除强制静音
+                except Exception:
+                    pass
+                try:
                     self.browser.detach()
                 except Exception:
                     pass
@@ -132,6 +136,8 @@ class TaskRunner:
 
     def action_brush_course(self, platform="ai", course_name="大学生心理健康"):
         br = self.ensure_browser()
+        br.install_guards(prefer_resume=True)
+        self.bus.log("刷课期间：播放器自动静音，续播弹窗自动点「继续播放」")
 
         def cb(i, n, name):
             self.bus.progress(int(i / max(1, n) * 100), f"{i}/{n} {name[:30]}")
@@ -153,6 +159,9 @@ class TaskRunner:
             return f"已全部完成 {res.get('done_after')}/{res.get('total')}"
 
         self.bus.progress(100, "刷课完成")
+        quiz = res.get("quiz") or []
+        if quiz:
+            self.bus.log(f"有 {len(quiz)} 项测验/作业未处理：这类要自己答题，拖进度条不算完成")
         done_after = res.get("done_after")
         total_after = res.get("total_after")
         if done_after is not None:
@@ -163,6 +172,8 @@ class TaskRunner:
 
     def action_watch_time(self, target_hours=5.0, max_minutes=300):
         br = self.ensure_browser()
+        br.install_guards(prefer_resume=False)
+        self.bus.log("刷时长期间：播放器自动静音，续播弹窗自动点「重新开始」")
         plat = AiIcve(br, self.bus)
 
         def cb(pct, text):
@@ -195,6 +206,7 @@ class TaskRunner:
 
     def action_verify(self, platform="ai", course_name="大学生心理健康"):
         br = self.ensure_browser()
+        br.install_guards(prefer_resume=True)
         if platform == "ai":
             plat = AiIcve(br, self.bus)
             # v1.0.6：必须先进入课程再展开目录。否则停在首页时 list_resources 拿到 0 项，

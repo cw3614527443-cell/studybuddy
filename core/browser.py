@@ -173,6 +173,178 @@ class EdgeProc:
         cls._started = False
 
 
+# ---------------------------------------------------------------------------
+# 页面内「看门狗」：静音 + 续播弹窗自动关闭
+# ---------------------------------------------------------------------------
+# 为什么放进页面里跑，而不是用 Python 轮询？
+#   1. Playwright 同步 API 有线程亲和性，Python 侧没法再开一个看门狗线程；
+#   2. 弹窗和「平台把 muted 改回 false」都是随时发生的，Python 只在某几步检查，
+#      中间几分钟的视频播放时间完全没人管 —— 实测就是这样漏掉的；
+#   3. 页面内的 setInterval 不受 Python 忙闲影响，0.5 秒一轮，反应快且零成本。
+# 脚本必须做到「幂等」：重复注入只更新开关，不重复装监听。
+_GUARD_JS = r"""
+(() => {
+  try {
+    if (window.__sbGuard) { window.__sbGuard.muteOn = true; return; }
+  } catch (e) { return; }
+
+  const G = window.__sbGuard = {
+    muteOn: true,        // 强制静音（任务结束时置 false，把声音还给用户）
+    preferResume: true,  // 续播弹窗优先点「继续播放」；刷时长会改成「重新开始」
+    muted: 0,            // 累计静音次数
+    modal: 0,            // 累计自动关闭的弹窗数
+    lastModal: '',
+    lastAt: 0,
+    ticks: 0
+  };
+
+  // ---------- 静音 ----------
+  const media = (el) => {
+    if (!el) return;
+    const tag = (el.tagName || '').toUpperCase();
+    if (tag !== 'VIDEO' && tag !== 'AUDIO') return;
+    try {
+      if (!el.muted) { el.muted = true; G.muted++; }
+      if (el.volume !== 0) { try { el.volume = 0; } catch (e) {} }
+      if (el.defaultMuted !== true) el.defaultMuted = true;
+    } catch (e) {}
+  };
+
+  const muteAll = () => {
+    if (!G.muteOn) return;
+    let list;
+    try { list = document.querySelectorAll('video,audio'); } catch (e) { return; }
+    for (const el of list) media(el);
+  };
+
+  // 平台的播放器经常在 play() 之前把 muted 改回 false（音量条初始化、自动播放策略等），
+  // 所以要在 play() 真正下发前再抢一次。
+  try {
+    const proto = HTMLMediaElement.prototype;
+    const raw = proto.play;
+    if (raw && !raw.__sbHooked) {
+      const hooked = function () {
+        try { if (G.muteOn) media(this); } catch (e) {}
+        return raw.apply(this, arguments);
+      };
+      hooked.__sbHooked = true;
+      proto.play = hooked;
+    }
+  } catch (e) {}
+
+  // ---------- 续播弹窗 ----------
+  // 只认「上次播放 / 是否继续」这一类询问框，别的弹窗一律不碰（防止误点确认按钮）
+  const HINT = /上次播放|是否继续|继续上次|未播放完|上次未完成|断点续播|继续观看/;
+  const BTN = 'button,[role="button"],a,.ivu-btn,.el-button,[class*="btn"],[class*="Btn"],[class*="button"]';
+
+  const visible = (e) => {
+    if (!e) return false;
+    const r = e.getBoundingClientRect();
+    if (r.width < 2 || r.height < 2) return false;
+    const st = getComputedStyle(e);
+    return st.display !== 'none' && st.visibility !== 'hidden' && st.opacity !== '0';
+  };
+
+  // 从按钮往上找，最近的一个「高 z-index 浮层」里是否含续播文案
+  const hintDialog = (el) => {
+    let p = el, i = 0;
+    while (p && i++ < 12) {
+      let st;
+      try { st = getComputedStyle(p); } catch (e) { return null; }
+      if (st.position === 'fixed' || st.position === 'absolute') {
+        const z = parseInt(st.zIndex, 10) || 0;
+        if (z >= 50) {
+          const t = (p.innerText || '').trim();
+          if (t && t.length < 400 && HINT.test(t)) return p;
+        }
+      }
+      p = p.parentElement;
+    }
+    return null;
+  };
+
+  const findBtn = (label) => {
+    let best = null, all;
+    try { all = document.querySelectorAll(BTN); } catch (e) { return null; }
+    for (const e of all) {
+      if (e.children.length > 1) continue;
+      if ((e.textContent || '').trim() !== label) continue;
+      if (!visible(e)) continue;
+      if (e.disabled) continue;
+      if (/disabled/i.test(String(e.className || ''))) continue;
+      if (!hintDialog(e)) continue;
+      if (!best) { best = e; continue; }
+      if (best.contains && best.contains(e)) best = e;   // 取最内层，别点外层容器
+    }
+    return best;
+  };
+
+  let lastClick = 0;
+  const closeModal = () => {
+    const now = Date.now();
+    if (now - lastClick < 900) return false;   // 冷却，避免对着同一个按钮连点
+    const order = G.preferResume ? ['继续播放', '重新开始'] : ['重新开始', '继续播放'];
+    for (const label of order) {
+      const b = findBtn(label);
+      if (!b) continue;
+      try { b.click(); } catch (e) { continue; }
+      G.modal++; G.lastModal = label; G.lastAt = now;
+      lastClick = now;
+      return true;
+    }
+    return false;
+  };
+
+  // ---------- 定时 ----------
+  let pending = false;
+  const scheduleMute = () => {          // DOM 变动时补一次静音（节流，避免频繁 querySelectorAll）
+    if (pending) return;
+    pending = true;
+    setTimeout(() => { pending = false; muteAll(); }, 200);
+  };
+  try {
+    new MutationObserver(scheduleMute).observe(document.documentElement, {childList: true, subtree: true});
+  } catch (e) {}
+
+  setInterval(() => { G.ticks++; muteAll(); closeModal(); }, 500);
+
+  window.__sbGuardTick = () => { muteAll(); closeModal(); return G; };
+  muteAll();
+})();
+"""
+
+
+def _frames_of(page):
+    """取页面下所有 frame（含跨域 iframe），失败则只返回主 frame。"""
+    try:
+        return list(page.frames)
+    except Exception:
+        return [page]
+
+
+def install_guard(page, prefer_resume=True, mute=True):
+    """给页面及所有 frame 装看门狗（幂等，可重复调用）。
+
+    用 `add_init_script` 注册一份，保证**每次导航 / 新建 iframe 都自动注入**；
+    同时立刻对已存在的 frame 执行一次，当前页面不用等刷新就生效。
+    """
+    try:
+        page.add_init_script(_GUARD_JS)
+    except Exception:
+        pass
+    flags = {"preferResume": bool(prefer_resume), "muteOn": bool(mute)}
+    for f in _frames_of(page):
+        try:
+            f.evaluate(_GUARD_JS)
+            f.evaluate(
+                """(o) => { const g = window.__sbGuard; if (!g) return false;
+                    g.preferResume = o.preferResume; g.muteOn = o.muteOn; return true; }""",
+                flags,
+            )
+        except Exception:
+            continue
+
+
 class Browser:
     """**一次任务内**的 Playwright 连接。
 
@@ -187,6 +359,8 @@ class Browser:
         self.ctx = None
         self.page = None
         self._shot_seq = 0
+        self._guard_seen = {"modal": 0, "muted": 0}
+        self._mute_logged = False
 
     # ---------- 生命周期 ----------
     def connect(self, launch=True, headless=False, start_url=None, timeout=40, log=None):
@@ -249,6 +423,77 @@ class Browser:
             return self.page is not None and not self.page.is_closed()
         except Exception:
             return False
+
+    # ---------- 看门狗（静音 + 弹窗） ----------
+    def install_guards(self, prefer_resume=True, mute=True):
+        """开始刷课/刷时长前调用：自动静音 + 自动关续播弹窗。"""
+        if self.page is None:
+            return False
+        install_guard(self.page, prefer_resume=prefer_resume, mute=mute)
+        self._guard_seen = {"modal": 0, "muted": 0}
+        self._mute_logged = False
+        return True
+
+    def guard_set(self, prefer_resume=None, mute=None):
+        """运行中调整开关（例如刷时长改成优先「重新开始」）。"""
+        for f in _frames_of(self.page):
+            try:
+                f.evaluate(
+                    """(o) => { const g = window.__sbGuard; if (!g) return false;
+                        if (o.preferResume !== null) g.preferResume = o.preferResume;
+                        if (o.muteOn !== null) g.muteOn = o.muteOn;
+                        return true; }""",
+                    {"preferResume": prefer_resume, "muteOn": mute},
+                )
+            except Exception:
+                continue
+
+    def guard_stats(self):
+        """汇总所有 frame 的计数（弹窗关闭数 / 静音次数）。"""
+        agg = {"modal": 0, "muted": 0, "last": "", "frames": 0}
+        if self.page is None:
+            return agg
+        for f in _frames_of(self.page):
+            try:
+                g = f.evaluate(
+                    "() => window.__sbGuard ? {m: window.__sbGuard.modal, "
+                    "u: window.__sbGuard.muted, l: window.__sbGuard.lastModal} : null"
+                )
+            except Exception:
+                continue
+            if not g:
+                continue
+            agg["frames"] += 1
+            agg["modal"] += g.get("m") or 0
+            agg["muted"] += g.get("u") or 0
+            if g.get("l"):
+                agg["last"] = g["l"]
+        return agg
+
+    def guard_flush(self):
+        """把看门狗新做的事写成日志（没有变化就什么都不做，可高频调用）。"""
+        agg = self.guard_stats()
+        prev = self._guard_seen or {"modal": 0, "muted": 0}
+        # 页面导航会重置脚本状态，计数变小不代表出错，直接重新对齐
+        if agg["modal"] < prev["modal"] or agg["muted"] < prev["muted"]:
+            prev = {"modal": 0, "muted": 0}
+        dm = agg["modal"] - prev["modal"]
+        du = agg["muted"] - prev["muted"]
+        if dm:
+            self._log(f"已自动关闭续播弹窗 ×{dm}（点「{agg['last']}」）")
+        if du and not self._mute_logged:
+            self._mute_logged = True
+            self._log("播放器已自动静音（刷课全程不出声）")
+        self._guard_seen = {"modal": agg["modal"], "muted": agg["muted"]}
+        return dm
+
+    def release_guards(self):
+        """任务结束：停止强制静音，把音量控制权还给用户（自己看视频时能开声音）。"""
+        try:
+            self.guard_flush()
+            self.guard_set(mute=False)
+        except Exception:
+            pass
 
     def shot(self, tag="shot"):
         """截图并返回路径；失败返回 None（不抛异常）。"""

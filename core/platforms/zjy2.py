@@ -27,6 +27,8 @@ v1.2.2 修「网慢时脚本抢跑，刷的完全无效」：
 import re
 import time
 
+from core.kinds import KIND_LABEL, kind_of_name
+
 ZJY2_INDEX = "https://zjy2.icve.com.cn/study/v2/coursePreview/spoccourseIndex"
 
 # 内容加载等待：基准 26 秒；只要页面还挂着 loading，最多再续 2 次（每次 8 秒），
@@ -255,7 +257,7 @@ class Zjy2:
           否则已完成项会被当成待刷（v1.2.2 之前的坑）；
         - 没有 .ziProgress 但有完成勾的，也算 100%。
         """
-        return self.p.evaluate(
+        raw = self.p.evaluate(
             """() => {
                 const out = [], seen = new Set();
                 for (const f of document.querySelectorAll('.fwenjianjia')) {
@@ -284,6 +286,9 @@ class Zjy2:
                 return out;
             }"""
         )
+        for r in raw:
+            r["kind"] = kind_of_name(r["name"])
+        return raw
 
     # ---------- 打开资源 ----------
     def _click_node(self, node_id, mode=0):
@@ -487,11 +492,13 @@ class Zjy2:
 
     # ---------- 刷课 ----------
     def _dismiss_resume(self):
-        for _ in range(3):
-            if self.br.click_text("继续播放", timeout=700):
-                self.br.wait(700)
-            else:
-                break
+        """兜底关续播弹窗（正常由页面内看门狗处理，这里防它没跑到）。"""
+        for label in ("继续播放", "重新开始"):
+            for _ in range(2):
+                if self.br.click_text(label, timeout=700):
+                    self.br.wait(700)
+                else:
+                    break
 
     def _learn_current(self, name=""):
         """处理当前打开的资源：视频拖到末尾 / 文档翻到末页。
@@ -630,6 +637,7 @@ class Zjy2:
             if self._stopped():
                 return False
             self.br.wait(1000)
+            self.br.guard_flush()
             s = self._video_state()
             if not s:
                 return False
@@ -708,17 +716,32 @@ class Zjy2:
 
         self.expand_all()
         items = self.list_resources()
-        # 没有进度条的叶子节点多半是「讨论/作业」这类，没有可刷的进度，直接跳过，
-        # 免得对每一项都重试到超时。
-        brushable = [x for x in items if x["pct"] >= 0]
-        no_prog = len(items) - len(brushable)
-        todo = [x for x in brushable if x["pct"] < 100]
-        self._log(f"资源 {len(items)} 项（已完成 {len(brushable) - len(todo)} 项），"
-                  f"待刷 {len(todo)} 项" + (f"，另有 {no_prog} 项无进度标记已跳过" if no_prog else ""))
+
+        # 三分类：能刷的（有进度条的视频/文档）/ 题目类（要自己答）/ 无进度标记的其它
+        quizzes = [x for x in items if x["kind"] == "quiz"]
+        marked = [x for x in items if x["pct"] >= 0 and x["kind"] != "quiz"]
+        no_prog = len(items) - len(marked) - len(quizzes)
+        todo = [x for x in marked if x["pct"] < 100]
+
+        summary = (f"资源 {len(items)} 项：可刷 {len(marked)} 项"
+                   f"（已完成 {len(marked) - len(todo)} 项），待刷 {len(todo)} 项")
+        if quizzes:
+            summary += f"，测验/作业 {len(quizzes)} 项（需自己作答）"
+        if no_prog:
+            summary += f"，{no_prog} 项无进度标记已跳过"
+        self._log(summary)
+        if quizzes:
+            for q in quizzes[:8]:
+                self._log(f"  · 需自己答：{q['name'][:46]}" +
+                          ("（已完成）" if q["pct"] >= 100 else ""))
+            if len(quizzes) > 8:
+                self._log(f"  · 另有 {len(quizzes) - 8} 项题目类资源，见网页目录")
+
         if not todo:
-            self._log("该课程资源已全部完成，无需刷课")
+            self._log("可刷的资源已全部完成，无需刷课")
             return {"total": len(items), "todo": 0, "ok": 0, "ran": 0,
-                    "done_after": len(brushable), "total_after": len(brushable), "failed": []}
+                    "done_after": len(marked), "total_after": len(marked),
+                    "failed": [], "quiz": [x["name"] for x in quizzes]}
 
         ok, ran, failed = 0, 0, []
         for i, r in enumerate(todo, 1):
@@ -726,7 +749,9 @@ class Zjy2:
                 break
             if progress_cb:
                 progress_cb(i, len(todo), r["name"])
-            self._log(f"[{i}/{len(todo)}] {r['name'][:40]}（当前 {r['prog'] or '无进度'}）")
+            self._log(f"[{i}/{len(todo)}] {r['name'][:40]}（当前 {r['prog'] or '无进度'}，"
+                      f"{KIND_LABEL.get(r['kind'], '资源')}）")
+            self.br.guard_flush()
 
             confirmed, executed = False, False
             for attempt in (1, 2, 3):
@@ -779,6 +804,7 @@ class Zjy2:
                 failed.append(r["name"])
                 self._log("  × 未确认完成，稍后可点「⑤ 复核」再查", "warn")
             self.br.shot(f"brush_{i:03d}")
+            self.br.guard_flush()
 
         # 收尾：回目录复核真实完成数
         self.go_index()
@@ -787,5 +813,8 @@ class Zjy2:
         done_after = sum(1 for x in after if x["pct"] >= 100)
         self._log(f"刷课结束：本次执行 {ran}/{len(todo)} 项，当场确认 {ok} 项，"
                   f"目录标记完成 {done_after}/{len(after)}")
+        if quizzes:
+            self._log(f"提醒：还有 {len(quizzes)} 项测验/作业需要你在网页里自己作答，本工具不代答")
         return {"total": len(items), "todo": len(todo), "ok": ok, "ran": ran,
-                "done_after": done_after, "total_after": len(after), "failed": failed}
+                "done_after": done_after, "total_after": len(after), "failed": failed,
+                "quiz": [x["name"] for x in quizzes]}
