@@ -44,6 +44,31 @@
 - **已安装 Microsoft Edge**（程序复用系统 Edge，不打包浏览器内核）
 - Python 3.9+（仅源码运行与打包需要，使用发布版不需要）
 
+### 方式一：安装包（推荐）
+
+下载 `StudyBuddy-Setup-x.y.z.exe`，双击按向导安装。特点：
+
+- **不需要管理员权限**，按用户安装到 `%LOCALAPPDATA%\Programs\StudyBuddy`
+- 自动创建开始菜单快捷方式，桌面快捷方式可选
+- 自带卸载程序（设置 → 应用，或开始菜单里的「卸载 StudyBuddy」）
+- 卸载**不会删除**登录态（存放在 `%LOCALAPPDATA%\StudyBuddy`），重装免扫码
+
+> 程序无数字签名，SmartScreen 会拦一次，点「更多信息 → 仍要运行」即可。
+
+### 方式二：免安装包（绿色版）
+
+下载 `StudyBuddy-x.y.z-win64.zip`，解压后双击 `StudyBuddy.exe`。
+
+**整个文件夹**（含 `_internal/`）必须一起复制，exe 单独拷走会闪退。数据（登录态、截图、日志）就放在 exe 旁边，删目录即彻底清除。
+
+| | 安装版 | 免安装版 |
+|---|---|---|
+| 管理员权限 | 不需要 | 不需要 |
+| 快捷方式 | 自动创建 | 手动 |
+| 卸载 | 控制面板卸载 | 删文件夹 |
+| 数据位置 | `%LOCALAPPDATA%\StudyBuddy` | exe 同目录 |
+| 卸载后登录态 | **保留**，重装免登录 | 随目录删除 |
+
 ### 源码运行
 
 ```bash
@@ -59,13 +84,18 @@ python main.py
 python -m playwright install-deps   # 非必需，仅用系统 Edge 时可跳过
 ```
 
-### 打包成免安装程序
+### 打包
 
 ```bash
+# 1. 打包主程序，产物在 dist/StudyBuddy/
 python -m PyInstaller build.spec --noconfirm --clean
+
+# 2. 打包安装包（需先装 Inno Setup 6：winget install JRSoftware.InnoSetup）
+"C:\Program Files (x86)\Inno Setup 6\ISCC.exe" installer\studybuddy.iss
+# 产物在 installer_out/StudyBuddy-Setup-x.y.z.exe
 ```
 
-产物在 `dist/StudyBuddy/`，**整个文件夹**（含 `_internal/`）一起复制给对方，双击 `StudyBuddy.exe` 运行。
+`installer/studybuddy.iss` 里的 `MyAppVersion` 与 `SrcDir` 需与 `config.py` 的 `APP_VERSION`、PyInstaller 输出目录保持一致。
 
 > 注意：`StudyBuddy.exe` 不能单独拷贝，必须与 `_internal/` 同目录。程序无数字签名，首次运行 Windows SmartScreen 会拦一次，点「更多信息 → 仍要运行」即可。
 
@@ -104,7 +134,7 @@ TaskRunner（每任务一个线程）
 ```
 StudyBuddy/
 ├── main.py                入口（含 --selftest 无头自检）
-├── config.py              路径、站点、端口、默认参数（支持 SB_USERDATA / SB_CDP_PORT 覆盖）
+├── config.py              路径、站点、端口、数据目录解析
 ├── core/
 │   ├── browser.py         Edge 进程管理 + CDP 连接 + 截图 + 弹窗识别
 │   ├── events.py          事件总线
@@ -113,6 +143,11 @@ StudyBuddy/
 │       ├── ai_icve.py     AI 优课适配器
 │       └── zjy2.py        zjy2 适配器
 ├── ui/app.py              tkinter 界面
+├── installer/
+│   ├── studybuddy.iss     Inno Setup 安装脚本
+│   └── installed.flag     安装版标记（由安装器写入程序目录）
+├── assets/                应用图标（icon.ico 7 档尺寸）
+├── tools/make_icon.py     图标生成脚本（纯几何绘制，不依赖字体）
 ├── tests/                 回归测试（重连 / 拖进度条 / 续播弹窗）
 ├── build.spec             PyInstaller 配置
 ├── CHANGELOG.md           更新历史
@@ -123,7 +158,9 @@ StudyBuddy/
 
 - `userdata/` — Edge profile，**含登录态，勿提交、勿外发**
 - `shots/` — 每步操作截图，排障用
-- `logs/` — 日志
+- `logs/` — 日志（`--selftest` 结果也写在这里）
+
+这三者默认位于程序目录；安装版位于 `%LOCALAPPDATA%\StudyBuddy`。可用环境变量 `SB_DATA_DIR` 整体覆盖，`portable.txt` 强制便携模式。
 
 ## 常见问题
 
@@ -142,13 +179,19 @@ StudyBuddy/
 **Q：9222 端口被占用？**
 同一时间只允许一个受控浏览器实例。可设 `SB_CDP_PORT=9333` 跑隔离实例（自检默认这样做，不会抢你正在用的浏览器）。
 
+**Q：安装时需要管理员权限吗？装到 Program Files 会不会写不进登录态？**
+不需要管理员权限，安装版固定在用户目录（`%LOCALAPPDATA%\Programs\StudyBuddy`），登录态另存于 `%LOCALAPPDATA%\StudyBuddy`。即便手动装到 `Program Files`，程序检测到目录不可写也会自动把数据改存到 `%LOCALAPPDATA%`。
+
+**Q：卸载后登录态还在？想彻底清除怎么办？**
+这是有意设计——卸载不删登录态，重装直接可用。要彻底清除，删掉 `%LOCALAPPDATA%\StudyBuddy` 整个目录即可。
+
 ## 开发
 
 版本号在 `config.py` 的 `APP_VERSION`，每次改动需同步写入 `CHANGELOG.md`。
 
 ```bash
 python -m py_compile main.py config.py core/*.py core/platforms/*.py ui/*.py
-python main.py --selftest          # 无头自检，结果写 selftest_result.txt
+python main.py --selftest          # 无头自检，结果写入数据目录 logs/selftest_result.txt
 ```
 
 `.vscode/` 内有现成的 F5 调试配置与打包任务。

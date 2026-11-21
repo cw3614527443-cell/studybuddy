@@ -10,6 +10,11 @@ from PyInstaller.utils.hooks import collect_submodules, collect_data_files
 
 block_cipher = None
 
+_ICON = os.path.abspath(os.path.join("assets", "icon.ico"))
+if not os.path.exists(_ICON):
+    _ICON = None
+print(f"[spec] icon = {_ICON}")
+
 hiddenimports = collect_submodules("playwright") + ["PIL.Image", "PIL.ImageTk"]
 
 # playwright 需要完整的 driver（含 node.exe 与 package），否则打包后无法驱动浏览器
@@ -25,6 +30,10 @@ if os.path.isdir(_driver):
             rel = os.path.relpath(src, _pw_root)
             dst = os.path.join("playwright", os.path.dirname(rel))
             _datas.append((src, dst))
+# 图标同时打进包内，供 tkinter 设置窗口 / 任务栏图标
+if _ICON:
+    _datas.append((_ICON, "assets"))
+
 # 去重
 _seen = set()
 _datas2 = []
@@ -65,7 +74,7 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
-    icon=None,
+    icon=_ICON,
 )
 coll = COLLECT(
     exe,

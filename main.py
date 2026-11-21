@@ -13,7 +13,13 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 def run_selftest():
     """无头自检：验证 playwright 驱动 + 系统 Edge 是否可用。结果写入文件便于窗口模式查看。"""
-    log_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "selftest_result.txt")
+    # v1.1.0：结果写到数据目录（logs/），不写程序目录 ——
+    # 安装版装在 %LOCALAPPDATA%\Programs 时程序目录未必可写。
+    try:
+        from config import LOGS_DIR
+        log_path = os.path.join(LOGS_DIR, "selftest_result.txt")
+    except Exception:
+        log_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "selftest_result.txt")
     lines = []
 
     def out(s):

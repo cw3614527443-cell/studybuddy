@@ -42,6 +42,13 @@ class App:
         self._photo = None
 
         root.title(f"{APP_NAME} v{APP_VERSION}")
+        # v1.1.0：窗口与任务栏图标（打包后从 _MEIPASS 取；缺失时静默跳过）
+        try:
+            from config import ICON_PATH
+            if os.path.exists(ICON_PATH):
+                root.iconbitmap(default=ICON_PATH)
+        except Exception:
+            pass
         root.geometry("1080x720")
         root.minsize(960, 640)
 
