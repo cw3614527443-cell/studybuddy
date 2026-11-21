@@ -153,6 +153,60 @@ class TaskRunner:
         self.bus.log(f"已打开：{site_home}")
         return "已打开页面"
 
+    def action_list_courses(self, platform="ai"):
+        """扫描「我的课程」页，逐门检测有无可刷资源，回传带标注的列表。
+
+        可刷 = 教学内容里有视频/文档（quiz 不算）；无课 = 教学内容为空。
+        检测失败的不硬塞进列表，单独说明，避免误导用户。
+        """
+        br = self.ensure_browser()
+        plat = AiIcve(br, self.bus) if platform == "ai" else Zjy2(br, self.bus)
+        pname = "AI 优课" if platform == "ai" else "zjy2"
+        # 扫描会连点十几门课，先把历史遗留的多余标签页收掉，避免页面选择混乱
+        try:
+            br.close_extra_tabs()
+        except Exception:
+            pass
+        self.bus.progress(5, "正在打开「我的课程」…")
+        names = plat.list_course_names()
+        if names is None or _login_expired(br):
+            self.bus.log("登录状态已失效，请点「① 启动浏览器 / 登录」重新扫码后再扫描", "error")
+            self.bus.courses([], platform)
+            return "未登录"
+        if not names:
+            self.bus.log("没读到课程列表，可能页面还在加载或平台改版了", "warn")
+            self.bus.courses([], platform)
+            return "未读到课程"
+        self.bus.log(f"{pname}：识别到 {len(names)} 门课，正在逐门检测有无可刷内容…")
+
+        items = []
+        unknown = []
+        total = len(names)
+        for i, name in enumerate(names, 1):
+            if self.bus.should_stop():
+                self.bus.log("已停止扫描", "warn")
+                break
+            self.bus.progress(5 + int(90 * i / total), f"检测 {i}/{total}：{name}")
+            self.bus.log(f"  [{i}/{total}] 检测「{name}」…")
+            result = plat.probe_course(name)
+            if result is True:
+                items.append({"name": name, "brushable": True, "note": "可刷"})
+                self.bus.log(f"  [{i}/{total}] 「{name}」→ 可刷", "ok")
+            elif result is False:
+                items.append({"name": name, "brushable": False, "note": "无课"})
+                self.bus.log(f"  [{i}/{total}] 「{name}」→ 无课")
+            else:
+                unknown.append(name)
+                self.bus.log(f"  [{i}/{total}] 「{name}」检测失败，已跳过", "warn")
+
+        self.bus.courses(items, platform)
+        self.bus.progress(100, f"识别完成：{len(items)} 门")
+        msg = f"识别 {len(items)} 门（可刷 {sum(1 for x in items if x['brushable'])} / 无课 {sum(1 for x in items if not x['brushable'])}）"
+        if unknown:
+            msg += f"，{len(unknown)} 门检测失败"
+        self.bus.log(msg, "ok")
+        return msg
+
     def _course_progress(self, platform="ai", course_name="大学生心理健康", br=None):
         """统计课程完成度：已完成项 / 总项。
 

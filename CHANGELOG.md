@@ -9,6 +9,32 @@
 
 ---
 
+## v1.4.4 —— 2026-11-21
+
+### 新增：课程列表自动识别，课程名不再手输
+原来「任务参数」里的课程名是手工输入框，用户反馈"不智能、可能打错字"。改成从平台自动读取 + 下拉选择，并在每项旁边标出「可刷 / 无课」。
+
+**两平台的课程列表页（真机实测）**
+
+- AI 优课：`https://ai.icve.com.cn/app/my-excellent-home/myCourses`，课程卡片 `.course-name`，「校内私有课」tab，12 门分 2 页；
+- zjy2：`https://zjy2.icve.com.cn/study/v2/course`，课程卡片 `.course_item .course_name`，共 12 门不分页。
+
+**「可刷 / 无课」判定**：进入课程的教学内容页 → 展开目录 → 数视频/文档类叶子节点（quiz 不算）。>0 标「可刷」，=0 标「无课」。AI 优课点课程卡片会新开 zjy2 域标签页（先到知识图谱 spoccourseZstp，再点「教学内容」跳 spoccourseIndex），因此切换后按课程名校验页面，防止读到别的 tab 的残留数据。
+
+**空课加速**：空课永远等不到 `.listItem`，原来 `wait_ready()` 会等 20s×4 轮白耗；新增 `probe_resources_fast()`，6 秒内无章节且无加载遮罩即判「无课」。
+
+**实现要点**
+
+- `core/events.py` 新增 `bus.courses(items, platform)` 事件，后台线程把列表推回 GUI；
+- `core/tasks.py::action_list_courses`：ensure_browser → 清理多余 tab → 枚举课程名 → 逐门探测（可停止）→ 回传带 note 的列表；
+- `core/platforms/ai_icve.py`：`list_course_names`（切校内私有课 tab + 翻页）、`_open_course_for_probe`、`probe_course`（委托 zjy2 结构判定）；
+- `core/platforms/zjy2.py`：`list_course_names`、`enter_course`（点「学习」）、`probe_course`、`probe_resources_fast`；
+- `core/browser.py`：`switch_to_course_tab`（按课程名找 tab）、`switch_to_newest_tab`、`close_extra_tabs`；
+- `ui/widgets.py::CoursePicker`：自绘只读下拉，弹出列表每项带绿色「可刷」/灰色「无课」标签 + 「重新扫描」入口；
+- `ui/app.py`：课程名输入框换成 CoursePicker + 「扫描课程」链接，切换平台清空旧列表，`_poll_bus` 处理 courses 事件。
+
+**真机验证**：AI 优课扫出 11 门（3 可刷 / 8 无课），zjy2 扫出 8 门（3 可刷 / 5 无课），判定与实际课程一致（形势与政策、通识课、心理健康有课件；人工智能数学基础教学内容为空→无课，与用户截图一致）。少数门因真机时序检测失败被跳过，未硬塞进列表；可点「重新扫描」补。`tests/test_courses.py` 11 项离线断言全过。
+
 ## v1.4.3 —— 2026-11-21
 
 ### 修复：文档续播弹窗没关 + 进度 0% 还一直往后刷

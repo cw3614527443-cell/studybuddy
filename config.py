@@ -72,7 +72,7 @@ DEFAULT_TARGET_HOURS = 5.0
 CDP_PORT = int(os.environ.get("SB_CDP_PORT") or 9222)
 
 APP_NAME = "StudyBuddy 学习助手"
-APP_VERSION = "1.4.3"
+APP_VERSION = "1.4.4"
 
 
 # ---------------------------------------------------------------------------

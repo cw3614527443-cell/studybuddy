@@ -239,8 +239,23 @@ class App:
         self.course_var = tk.StringVar(value="大学生心理健康")
         self.hours_var = tk.StringVar(value=str(DEFAULT_TARGET_HOURS))
         self.maxmin_var = tk.StringVar(value="300")
+        self._courses = []  # 扫描出的课程列表 [{name, brushable, note}]
 
-        self._field(form, 0, "课程名", self.course_var, suffix="")
+        # 课程名：可扫描选择的下拉列表（不再手输，避免错字找不到课程）
+        cf = tk.Frame(form, bg=W.CARD)
+        cf.grid(row=0, column=0, sticky="ew", padx=(0, 0))
+        lbl_row = tk.Frame(cf, bg=W.CARD)
+        lbl_row.pack(fill="x")
+        tk.Label(lbl_row, text="课程名", bg=W.CARD, fg=W.TEXT_MUT,
+                 font=W.font(8)).pack(side="left")
+        self.btn_scan = W.NavButton(lbl_row, text="扫描课程", kind="link",
+                                    command=self.on_scan_courses, height=18)
+        self.btn_scan.pack(side="right")
+        self.course_picker = W.CoursePicker(
+            cf, textvariable=self.course_var, on_refresh=self.on_scan_courses,
+            height=38, placeholder="先点右上「扫描课程」")
+        self.course_picker.pack(fill="x", pady=(p(4), 0))
+
         self._field(form, 1, "目标时长", self.hours_var, suffix="时", width=104,
                     padx=(p(14), 0))
         self._field(form, 2, "最长挂机", self.maxmin_var, suffix="分", width=104,
@@ -345,6 +360,8 @@ class App:
                     self._set_status(data.get("text", ""), "run")
                 elif kind == "shot":
                     self._show_shot(data.get("path"))
+                elif kind == "courses":
+                    self._on_courses(data)
                 elif kind == "done":
                     self._on_task_done(data)
         finally:
@@ -392,11 +409,38 @@ class App:
         info = self.PLATFORM_INFO.get(self.platform_var.get(), {})
         self.host_label.config(text=info.get("host", ""))
         self.note_label.config(text=info.get("desc", ""))
+        # 课程列表按平台区分：切换平台时清空旧结果，提示重新扫描
+        if getattr(self, "_courses_platform", None) != self.platform_var.get():
+            self._courses = []
+            self._courses_platform = None
+            picker = getattr(self, "course_picker", None)
+            if picker is not None:
+                picker.set_items([])
         if not self.runner.is_running():
             ai = self.platform_var.get() == "ai"
             # zjy2 没有学时统计、题目页也还没适配 → 这两项在 zjy2 下置灰
             self._nav["watch"].config(state="normal" if ai else "disabled")
             self._nav["quiz"].config(state="normal" if ai else "disabled")
+
+    def _on_courses(self, data):
+        """后台扫描完课程列表，回填下拉框。"""
+        items = data.get("items") or []
+        self._courses = items
+        self._courses_platform = data.get("platform")
+        self.course_picker.set_items(items)
+        # 若当前选中的课不在新列表里，自动选中第一个（优先可刷的）
+        cur = self.course_var.get()
+        if items and not any(x.get("name") == cur for x in items):
+            first = next((x for x in items if x.get("brushable")), items[0])
+            self.course_var.set(first["name"])
+            self.course_picker._render()
+
+    def on_scan_courses(self):
+        if self.runner.is_running():
+            return
+        platform = self.platform_var.get()
+        self._run(lambda: self.runner.action_list_courses(platform), nav=None)
+        self._set_status("扫描课程中…", "run")
 
     def on_settings(self):
         from ui.llm_settings import LLMSettingsDialog
@@ -448,6 +492,11 @@ class App:
             "① 启动浏览器 / 登录\n"
             "    拉起一个受控的 Edge 窗口。第一次用要在里面扫码登录学习平台；\n"
             "    登录一次后，只要不点「关闭浏览器」，下次打开仍在登录状态。\n\n"
+            "【扫描课程】选好平台后，点任务参数里的「扫描课程」\n"
+            "    自动读取你在该平台的全部课程，列成下拉框；每项旁边标着\n"
+            "    「可刷」（教学内容里有视频/文档）或「无课」（教学内容是空的）。\n"
+            "    点课程名即可选中，不用再手打（打错字会找不到课程）。\n"
+            "    换平台后列表会清空，需要重新扫描一次。\n\n"
             "② 读取学习进度\n"
             "    AI 优课先读首页的「观看时长 / 学习次数」；如果这门课不计学时\n"
             "    （页面上没有这项数字），会自动改为统计目录里的刷课完成度。\n"
@@ -496,6 +545,8 @@ class App:
         self.btn_close.config(state=state)
         self.btn_help.config(state=state)
         self.btn_settings.config(state=state)
+        self.btn_scan.config(state=state)
+        self.course_picker.config(state=state)
         self.btn_stop.config(state="normal" if busy else "disabled")
         if not busy:
             for b in self._nav.values():

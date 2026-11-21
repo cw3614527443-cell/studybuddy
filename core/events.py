@@ -30,6 +30,10 @@ class EventBus:
     def done(self, ok=True, summary=""):
         self.q.put(("done", {"ok": ok, "summary": summary}))
 
+    def courses(self, items, platform=""):
+        """课程列表回传：items = [{name, brushable, note}]。"""
+        self.q.put(("courses", {"items": items, "platform": platform}))
+
     def request_stop(self):
         self._stop.set()
 

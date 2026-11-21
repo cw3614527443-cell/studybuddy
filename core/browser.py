@@ -403,6 +403,85 @@ class Browser:
                 continue
         return pages[-1]
 
+    def page_count(self):
+        try:
+            return len(list(self.ctx.pages or []))
+        except Exception:
+            return 0
+
+    def switch_to_newest_tab(self, expected=None, timeout=8):
+        """点击某些课程卡片后平台会**新开标签页**；切到那个最新页。
+
+        expected: URL 子串，只有新页 URL 含它才切（避免误切广告页）。
+        返回是否成功切换。
+        """
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            pages = list(self.ctx.pages or [])
+            for p in reversed(pages):
+                try:
+                    url = p.url or ""
+                except Exception:
+                    continue
+                if p is self.page:
+                    continue
+                if expected and expected not in url:
+                    continue
+                if "icve" not in url:
+                    continue
+                self.page = p
+                return True
+            time.sleep(0.4)
+        return False
+
+    def switch_to_course_tab(self, course_name, timeout=8):
+        """在所有标签页里找页面文本含指定课程名的那个，切过去。
+
+        课程卡片会新开 tab，且 tab 顺序不一定最新就是刚点的那门；用课程名
+        校验最可靠（课程页的面包屑和标题里都有课程名）。
+        """
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            pages = list(self.ctx.pages or [])
+            for p in pages:
+                try:
+                    url = p.url or ""
+                    if "spoccourse" not in url:
+                        continue
+                    text = p.evaluate(
+                        "() => ((document.querySelector('.info_title')||document.body)"
+                        ".innerText||'').slice(0,400)"
+                    ) or ""
+                    if course_name in text:
+                        self.page = p
+                        return True
+                except Exception:
+                    continue
+            time.sleep(0.5)
+        return False
+
+    def close_extra_tabs(self, keep_url_substr=None):
+        """关掉多余标签页，只保留含 keep_url_substr 的那个（没有则保留当前页）。
+
+        课程扫描会连点十几门课，某些平台每次都新开 tab，积多了会让页面选择混乱。
+        """
+        pages = list(self.ctx.pages or [])
+        keep = None
+        if keep_url_substr:
+            for p in pages:
+                if keep_url_substr in (p.url or ""):
+                    keep = p
+                    break
+        keep = keep or self.page
+        for p in pages:
+            if p is keep:
+                continue
+            try:
+                p.close()
+            except Exception:
+                pass
+        self.page = keep
+
     def detach(self):
         """断开本次任务的连接，**不关** Edge，登录态与页面都保留。
 

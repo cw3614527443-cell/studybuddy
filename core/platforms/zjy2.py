@@ -30,6 +30,7 @@ import time
 from core.kinds import KIND_LABEL, kind_of_name
 
 ZJY2_INDEX = "https://zjy2.icve.com.cn/study/v2/coursePreview/spoccourseIndex"
+ZJY2_COURSES = "https://zjy2.icve.com.cn/study/v2/course"
 
 # 内容加载等待：基准 26 秒；只要页面还挂着 loading，最多再续 2 次（每次 8 秒），
 # 硬上限 48 秒 —— 慢网够用，又不至于一个坏节点等上几分钟。
@@ -204,6 +205,92 @@ class Zjy2:
         if "courseware" in self.br.current_url() or "spoccourseIndex" not in self.br.current_url():
             self.br.goto(ZJY2_INDEX)
         return self.wait_ready()
+
+    # ---------- 课程列表（v1.4.4） ----------
+    def list_course_names(self, timeout=15):
+        """从「我的课程」页枚举课程名。卡片是 .course_item，课程名在 .course_name。"""
+        self.br.goto(ZJY2_COURSES)
+        deadline = time.time() + timeout
+        names = []
+        while time.time() < deadline:
+            names = self.p.evaluate(
+                """() => [...document.querySelectorAll('.course_item .course_name, .course_name')]
+                    .map(e => (e.textContent || '').trim())
+                    .filter(t => t && t.length < 60)"""
+            )
+            if names:
+                break
+            if self.br.on_login_page():
+                return None
+            self.br.wait(1000)
+        seen, out = set(), []
+        for n in names:
+            if n not in seen:
+                seen.add(n)
+                out.append(n)
+        return out
+
+    def enter_course(self, course_name, timeout=14):
+        """从「我的课程」页点某门课的「学习」，进入教学内容页。"""
+        if "/study/v2/course" not in self.br.current_url() or "spoccourseIndex" in self.br.current_url():
+            self.br.goto(ZJY2_COURSES)
+            self.br.wait(2000)
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            ok = self.p.evaluate(
+                """(name) => {
+                    const items = [...document.querySelectorAll('.course_item')];
+                    const it = items.find(x => ((x.querySelector('.course_name')||{}).textContent||'').trim() === name);
+                    if (!it) return false;
+                    const btn = it.querySelector('.course_btn') || it;
+                    btn.click(); return true;
+                }""",
+                course_name,
+            )
+            if ok:
+                break
+            self.br.wait(1000)
+        else:
+            return False
+        self.br.wait(2500)
+        return "spoccourseIndex" in self.br.current_url()
+
+    def probe_resources_fast(self, wait_ms=6000):
+        """快速判断当前课程页有无可刷资源（不跑 wait_ready 的 80 秒长等）。
+
+        空课（教学内容整个是空白）永远等不到 .listItem，所以这里只等几秒：
+        有章节就展开数叶子，没有章节且没加载遮罩就判无课。
+        """
+        deadline = time.time() + wait_ms / 1000.0
+        while time.time() < deadline:
+            try:
+                n = self.p.locator(".listItem[id]").count()
+                if n > 0:
+                    break
+                if self._tree_loading():
+                    self.br.wait(700)
+                    continue
+                # 没有章节、也没有加载遮罩：确认是空课
+                self.br.wait(800)
+                if self.p.locator(".listItem[id]").count() == 0:
+                    return False
+            except Exception:
+                pass
+            self.br.wait(700)
+        try:
+            self.expand_all(rounds=2)
+            items = self.list_resources()
+            brushable = [x for x in items if x.get("kind") != "quiz"]
+            return len(brushable) > 0
+        except Exception as e:
+            self._log(f"检测课程资源时出错：{e}", "warn")
+            return None
+
+    def probe_course(self, course_name, timeout=16):
+        """进入课程、展开目录，判断有无可刷资源（quiz 不算）。"""
+        if not self.enter_course(course_name, timeout=timeout):
+            return None
+        return self.probe_resources_fast()
 
     def _leaf_count(self):
         try:

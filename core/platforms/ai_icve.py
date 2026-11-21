@@ -105,6 +105,167 @@ class AiIcve:
         t = self.br.text()
         return ("登录" not in t[:200]) or ("我的课程" in t) or ("学习次数" in t)
 
+    MY_COURSES_URL = "https://ai.icve.com.cn/app/my-excellent-home/myCourses"
+
+    def list_course_names(self, timeout=15):
+        """从「我的课程」页枚举课程名（只看当前 tab，共 8 门/页）。
+
+        卡片课程名节点是 `.course-name`（span，title 属性同文本）。不去重点别的
+        tab（校外公开课/校内私有课），默认页就是用户已加入的课程。
+        """
+        self.br.goto(self.MY_COURSES_URL)
+        deadline = time.time() + timeout
+        # 必须等「我的课程」页自己的标志（.tab-item「校内私有课」）出现。
+        # 首页推荐的几门课也带 .course-name，不等待会误读成全部课程。
+        ready = False
+        while time.time() < deadline:
+            ready = self.p.evaluate(
+                "() => [...document.querySelectorAll('.tab-item')]"
+                ".some(e => (e.textContent||'').trim() === '校内私有课')"
+            )
+            if ready:
+                break
+            self.br.wait(1000)
+        if not ready:
+            # 等超时还没出现课程页标志，才判断是不是掉登录（中途页面可能短暂含登录字样）
+            return None if self.br.on_login_page() else []
+
+        # 切到「校内私有课」（用户真正要刷的课），它才是完整的加入课程列表
+        self.p.evaluate(
+            """() => {
+                const t=[...document.querySelectorAll('.tab-item')]
+                    .find(e=>(e.textContent||'').trim()==='校内私有课');
+                if(t && !String(t.className).includes('active')) t.click();
+            }"""
+        )
+        self.br.wait(1800)
+
+        names = self._read_course_names()
+        # 分页：页面上有个纯数字「2」的页码可点；翻一页再读，凑齐全部课程
+        page_nums = self.p.evaluate(
+            """() => [...document.querySelectorAll('li,a,button,span,div')]
+                .filter(e=>e.children.length===0 && (e.textContent||'').trim()==='2'
+                        && e.getBoundingClientRect().width>0)
+                .length"""
+        )
+        if page_nums:
+            clicked = self.p.evaluate(
+                """() => {
+                    const e=[...document.querySelectorAll('li,a,button,span,div')]
+                        .find(x=>x.children.length===0 && (x.textContent||'').trim()==='2'
+                              && x.getBoundingClientRect().width>0);
+                    if(!e) return false; (e.closest('li')||e).click(); return true;
+                }"""
+            )
+            if clicked:
+                self.br.wait(1800)
+                names += self._read_course_names()
+
+        # 去重保序
+        seen, out = set(), []
+        for n in names:
+            if n not in seen:
+                seen.add(n)
+                out.append(n)
+        return out
+
+    def _read_course_names(self):
+        return self.p.evaluate(
+            """() => [...document.querySelectorAll('.course-name')]
+                .map(e => (e.textContent || e.getAttribute('title') || '').trim())
+                .filter(t => t && t.length < 60)"""
+        )
+
+    def _open_course_for_probe(self, course_name, timeout=14):
+        """从课程列表页点开指定课程，落到教学内容页。返回是否成功。
+
+        实测：AI 优课点课程卡片会在**新标签页**里打开 zjy2 的课程页
+        （spoccourseZstp 知识图谱），再点该页「教学内容」菜单才到 spoccourseIndex。
+        所以这里点击后要切到新 tab，并在新 tab 上点「教学内容」。
+        """
+        self.br.goto(self.MY_COURSES_URL)
+        self.br.wait(1500)
+        self.p.evaluate(
+            """() => {
+                const t=[...document.querySelectorAll('.tab-item')]
+                    .find(e=>(e.textContent||'').trim()==='校内私有课');
+                if(t && !String(t.className).includes('active')) t.click();
+            }"""
+        )
+        self.br.wait(1200)
+        for page_turn in (1, 2):
+            deadline = time.time() + min(timeout, 6)
+            while time.time() < deadline:
+                opened = self.p.evaluate(
+                    """(name) => {
+                        const e=[...document.querySelectorAll('.course-name')]
+                            .find(x=>(x.textContent||'').trim()===name);
+                        if(!e) return false; e.click(); return true;
+                    }""",
+                    course_name,
+                )
+                if opened:
+                    break
+                self.br.wait(800)
+            if opened:
+                break
+            if page_turn == 1:
+                self.p.evaluate(
+                    """() => {
+                        const e=[...document.querySelectorAll('li,a,button,span,div')]
+                            .find(x=>x.children.length===0 && (x.textContent||'').trim()==='2'
+                                  && x.getBoundingClientRect().width>0);
+                        if(e) (e.closest('li')||e).click();
+                    }"""
+                )
+                self.br.wait(1500)
+        if not opened:
+            return False
+
+        # 点课程卡片后：在所有 tab 里按课程名找到刚打开的那个（跨 tab 顺序不可靠）
+        if not self.br.switch_to_course_tab(course_name, timeout=8):
+            self.br.switch_to_newest_tab("spoccourse", timeout=3)
+        self.p = self.br.page
+        self.br.wait(1500)
+        # 找教学内容菜单：知识图谱页(spoccourseZstp)需要点它跳到教学内容页
+        if "spoccourseZstp" in self.br.current_url():
+            self.p.evaluate(
+                """() => {
+                    const e=[...document.querySelectorAll('.menu_item,.tab-item')]
+                        .find(x=>(x.textContent||'').trim()==='教学内容');
+                    if(e) e.click();
+                }"""
+            )
+            self.br.wait(2500)
+        return "spoccourse" in self.br.current_url()
+
+    def probe_course(self, course_name, timeout=14):
+        """进入一门课，判断有没有可刷资源。返回 True/False/None。
+
+        True  = 教学内容里有视频/文档等可刷资源（quiz 不算）
+        False = 教学内容是空的（用户截图里「人工智能数学基础」那种）
+        None  = 判断失败（超时/掉登录/结构变了），不硬塞进列表误导用户
+        """
+        if not self._open_course_for_probe(course_name, timeout=timeout):
+            return None
+        # AI 课程页实际是 zjy2 域，用 zjy2 的 DOM 结构判定。
+        # 数资源前再校验一次页面课程名，防止读到别的 tab 的残留数据。
+        from core.platforms.zjy2 import Zjy2
+        z = Zjy2(self.br, self.bus)
+        try:
+            head = self.p.evaluate(
+                "() => ((document.querySelector('.info_title')||document.body).innerText||'').slice(0,300)"
+            ) or ""
+            if course_name not in head:
+                # 再找一次正确的 tab
+                self.br.switch_to_course_tab(course_name, timeout=5)
+                self.p = self.br.page
+                z = Zjy2(self.br, self.bus)
+            return z.probe_resources_fast()
+        except Exception as e:
+            self._log(f"检测「{course_name}」课程资源时出错：{e}", "warn")
+            return None
+
     def enter_course(self, course_name="大学生心理健康", timeout=20):
         """从首页课程卡片进入课程教学内容。
 
