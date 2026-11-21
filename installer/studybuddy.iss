@@ -9,11 +9,11 @@
 ;   由程序读取 installed.flag 判定；这样卸载不会误删登录态，重装免扫码。
 
 #define MyAppName "StudyBuddy 学习助手"
-#define MyAppVersion "1.1.0"
+#define MyAppVersion "1.2.0"
 #define MyAppPublisher "cw3614527443-cell"
 #define MyAppURL "https://github.com/cw3614527443-cell/studybuddy"
 #define MyAppExeName "StudyBuddy.exe"
-#define SrcDir "..\dist_final\StudyBuddy"
+#define SrcDir "..\dist_v120\StudyBuddy"
 
 [Setup]
 AppId={{9B2F4C71-6E3A-4D58-9C0B-7A1E53B8D204}
@@ -78,7 +78,6 @@ ExtractingLabel=正在解压文件…
 StatusExtractFiles=正在解压文件…
 StatusCreateIcons=正在创建快捷方式…
 StatusRunProgram=正在完成安装…
-WizardFinished=安装完成
 FinishedHeadingLabel=[name] 安装完成
 FinishedLabel=[name] 已成功安装。%n%n首次启动请点「① 启动浏览器 / 登录」完成登录。%n%n登录态保存在 {localappdata}\StudyBuddy，卸载时不会删除，重装后无需重新登录。
 ClickFinish=点「完成」退出安装程序。

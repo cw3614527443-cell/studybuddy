@@ -1,7 +1,9 @@
 # StudyBuddy · 智慧职教学习助手
 
 > 带图形界面的 Windows 桌面工具，用于批量处理智慧职教（icve）平台的课程资源进度与学时统计。
-> 基于 Python + tkinter + Playwright（CDP 接管本机 Edge），可打包成免安装程序。
+> 基于 Python + tkinter（自绘界面）+ Playwright（CDP 接管本机 Edge），提供安装包与免安装版。
+
+![界面截图](docs/screenshot.png)
 
 ## ⚠️ 免责声明
 
@@ -142,12 +144,15 @@ StudyBuddy/
 │   └── platforms/
 │       ├── ai_icve.py     AI 优课适配器
 │       └── zjy2.py        zjy2 适配器
-├── ui/app.py              tkinter 界面
+├── ui/
+│   ├── app.py             主界面（布局与交互）
+│   └── widgets.py         自绘控件：圆角卡片 / 导航项 / 分段选择器 / 进度条
 ├── installer/
 │   ├── studybuddy.iss     Inno Setup 安装脚本
 │   └── installed.flag     安装版标记（由安装器写入程序目录）
 ├── assets/                应用图标（icon.ico 7 档尺寸）
 ├── tools/make_icon.py     图标生成脚本（纯几何绘制，不依赖字体）
+├── tools/shot_ui.py       界面截图脚本（开发期比对视觉用）
 ├── tests/                 回归测试（重连 / 拖进度条 / 续播弹窗）
 ├── build.spec             PyInstaller 配置
 ├── CHANGELOG.md           更新历史
@@ -188,6 +193,15 @@ StudyBuddy/
 ## 开发
 
 版本号在 `config.py` 的 `APP_VERSION`，每次改动需同步写入 `CHANGELOG.md`。
+
+### 界面
+
+界面不使用 ttk 系统主题，全部由 `ui/widgets.py` 在 Canvas 上自绘（圆角卡片、导航项、分段选择器、
+进度条、状态胶囊）。尺寸按 96dpi 设计，运行时乘以 `SCALE`：
+
+- 启动时 `main.py` 声明 DPI 感知，`SCALE = 屏幕 DPI / 96`（125% → 1.25），文字不再被系统拉伸发虚；
+- 想验证其它缩放下是否溢出，可用 `SB_UI_SCALE=1.5 python main.py` 强制缩放；
+- 改完界面跑 `python tools/shot_ui.py shots/ui.png` 直接截图，不用手点。
 
 ```bash
 python -m py_compile main.py config.py core/*.py core/platforms/*.py ui/*.py

@@ -64,8 +64,25 @@ def run_selftest():
     return rc
 
 
+def enable_dpi_awareness():
+    """让程序自己按屏幕 DPI 渲染，而不是交给系统做位图拉伸。
+
+    v1.2.0：不声明 DPI 感知时，Windows 会把 96dpi 渲染出的窗口整体放大 125%，
+    文字发虚。声明之后 Tk 拿到真实 DPI，ui/widgets.py 里的 s() 负责按比例放大尺寸。
+    """
+    try:
+        import ctypes
+        try:
+            ctypes.windll.shcore.SetProcessDpiAwareness(1)   # 系统级 DPI 感知
+        except Exception:
+            ctypes.windll.user32.SetProcessDPIAware()        # Win7 兜底
+    except Exception:
+        pass
+
+
 def run_gui():
     import tkinter as tk
+    enable_dpi_awareness()
     from ui.app import App
     root = tk.Tk()
     app = App(root)
@@ -73,9 +90,36 @@ def run_gui():
     root.mainloop()
 
 
+def run_uishot(out_path):
+    """渲染界面、截图、退出。用于验证打包产物里的界面是否正常（不连浏览器）。"""
+    import tkinter as tk
+    from PIL import ImageGrab
+    from ui.app import App
+    enable_dpi_awareness()
+    root = tk.Tk()
+    App(root)
+    root.attributes("-topmost", True)
+
+    def cap():
+        root.update_idletasks()
+        root.update()
+        x, y = root.winfo_rootx(), root.winfo_rooty()
+        ImageGrab.grab(bbox=(x, y, x + root.winfo_width(),
+                             y + root.winfo_height())).save(out_path)
+        root.destroy()
+
+    root.after(800, cap)
+    root.mainloop()
+    return 0
+
+
 def main():
     if "--selftest" in sys.argv:
         sys.exit(run_selftest())
+    if "--uishot" in sys.argv:
+        i = sys.argv.index("--uishot")
+        out = sys.argv[i + 1] if len(sys.argv) > i + 1 else "uishot.png"
+        sys.exit(run_uishot(out))
     run_gui()
 
 
