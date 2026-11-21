@@ -209,4 +209,10 @@ class TaskRunner:
                 return "0/0（未读到资源）"
             self.bus.log(f"复核：{res['done']}/{res['total']} 已完成")
             return f"{res['done']}/{res['total']} 完成"
-        return "zjy2 复核暂未启用"
+        plat = Zjy2(br, self.bus)
+        res = plat.verify()
+        if res["total"] == 0:
+            self.bus.log("目录里没读到任何资源节点：可能课程未展开或页面还在加载", "warn")
+            return "0/0（未读到资源）"
+        self.bus.log(f"复核：{res['done']}/{res['total']} 已完成")
+        return f"{res['done']}/{res['total']} 完成"

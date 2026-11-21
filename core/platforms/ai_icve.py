@@ -15,6 +15,17 @@ import time
 
 from config import AI_ICVE_HOME
 
+# 页面上可能同时存在多个 video（上一个资源留下的播放器只是隐藏，并没有被移除）。
+# 一旦 querySelector('video') 抓到那个旧的，就会出现「日志说刷完了、网页还在放上一个视频」，
+# 所以统一只操作**可见且面积最大**的那一个。
+_PICK_VIDEO = """const pick = () => {
+    const vs = [...document.querySelectorAll('video')].filter(v => v.offsetParent !== null);
+    if (!vs.length) return null;
+    vs.sort((a, b) => (b.clientWidth * b.clientHeight) - (a.clientWidth * a.clientHeight));
+    return vs[0];
+};
+"""
+
 
 class AiIcve:
     name = "AI 优课"
@@ -165,12 +176,39 @@ class AiIcve:
     def video_state(self):
         try:
             return self.p.evaluate(
-                """()=>{const v=document.querySelector('video');
-                    return v?{dur:v.duration||0,cur:v.currentTime,paused:v.paused,
-                    ready:v.readyState,end:v.ended,err:v.error?v.error.code:null}:null;}"""
+                "() => {" + _PICK_VIDEO + """
+                    const v = pick();
+                    return v ? {dur:v.duration||0,cur:v.currentTime,paused:v.paused,
+                    ready:v.readyState,end:v.ended,err:v.error?v.error.code:null} : null;}"""
             )
         except Exception:
             return None
+
+    def node_done(self, node_id):
+        """读目录里这个节点的完成标记（wc=已完成，jd=未完成）。读不到返回 None。"""
+        try:
+            cls = self.p.evaluate(
+                """(id) => {const n=document.getElementById(id); if(!n) return null;
+                    const m=n.querySelector('i[class*=checkmark]'); return m?String(m.className):null;}""",
+                node_id,
+            )
+        except Exception:
+            return None
+        if cls is None:
+            return None
+        return "wc" in cls
+
+    def _wait_done(self, node_id, timeout=12):
+        """刷完回读目录标记 —— 这是唯一可信的「真的完成了」证据。"""
+        t0 = time.time()
+        while time.time() - t0 < timeout:
+            d = self.node_done(node_id)
+            if d:
+                return True
+            if self._stopped():
+                return False
+            self.br.wait(1500)
+        return False
 
     def wait_video(self, timeout=20):
         """等播放器出现并拿到 metadata。"""
@@ -237,9 +275,10 @@ class AiIcve:
         self.dismiss_modal(prefer_resume=not from_start)
         self.br.wait(1200)
         st = self.p.evaluate(
-            """()=>{const v=document.querySelector('video'); if(!v) return null;
-                if(v.currentTime>3){try{v.currentTime=0;}catch(e){}}
-                v.muted=true;v.volume=0;v.playbackRate=1;v.play().catch(()=>{});
+            "() => {" + _PICK_VIDEO + """
+                const v = pick(); if (!v) return null;
+                if (v.currentTime > 3) { try { v.currentTime = 0; } catch(e){} }
+                v.muted = true; v.volume = 0; v.playbackRate = 1; v.play().catch(()=>{});
                 return {dur:v.duration||0,cur:v.currentTime,paused:v.paused,ready:v.readyState};}"""
         )
         return st
@@ -256,10 +295,11 @@ class AiIcve:
                 return False
             self.br.wait(15000)
             s = self.p.evaluate(
-                """()=>{const v=document.querySelector('video');
-                    return v?{end:v.ended,cur:v.currentTime,paused:v.paused,dur:v.duration||0,
+                "() => {" + _PICK_VIDEO + """
+                    const v = pick();
+                    return v ? {end:v.ended,cur:v.currentTime,paused:v.paused,dur:v.duration||0,
                     ready:v.readyState,err:v.error?v.error.code:null,
-                    fail:document.body.innerText.includes('视频播放失败')}:null;}"""
+                    fail:document.body.innerText.includes('视频播放失败')} : null;}"""
             )
             if not s:
                 return False
@@ -272,19 +312,22 @@ class AiIcve:
             if s["end"] or (s["dur"] and s["cur"] >= s["dur"] - 1):
                 return True
             if s["paused"] and s["ready"] >= 2:
-                self.p.evaluate("""()=>{const v=document.querySelector('video');
-                    v.muted=true;v.playbackRate=1;v.play().catch(()=>{});}""")
+                self.p.evaluate(
+                    "() => {" + _PICK_VIDEO + """
+                        const v = pick();
+                        if (v) { v.muted = true; v.playbackRate = 1; v.play().catch(()=>{}); }}"""
+                )
             if time.time() - last_report >= 120:
                 last_report = time.time()
                 self._log(f"  播放中 {s['cur']:.0f}/{s['dur']:.0f}s")
         return False
 
     def skip_video(self, node, settle=4.0):
-        """刷课：打开视频后直接把进度条拖到末尾，不实际观看（v1.0.5）。
+        """刷课：打开视频后直接把进度条拖到末尾，不实际观看。
 
-        平台判定「完成」只看播放进度是否到达结尾，所以拖到结尾即可，不必真的
-        耗掉整段时长。为了让平台侧的进度上报能收到变化，分两步拖：
-        先到 50%，再到结尾前 0.5 秒，然后让它自然播完触发 ended。
+        v1.2.1：拖完不算完 —— 必须回读目录里这个节点的完成标记（wc）。
+        旧实现只认「video.ended」，一旦抓到上一个资源遗留的隐藏播放器（它早就 ended），
+        就会立刻返回成功，于是出现「日志一路刷完、网页还在放上一个视频」。
         """
         self.dismiss_modal(rounds=2)
         if not self.open_node(node):
@@ -297,52 +340,78 @@ class AiIcve:
             self._log("  未出现播放器，跳过", "warn")
             return False
 
+        node_id = node.get("id")
+        for attempt in range(2):
+            if self._stopped():
+                return False
+            if not self._drag_to_end(st, settle):
+                self._log("  拖动进度条没成功", "warn")
+                return False
+            # 目录标记是唯一可信证据：等它变 wc
+            if node_id and self._wait_done(node_id, timeout=12):
+                return True
+            if attempt == 0:
+                self._log("  进度拖到末尾但平台没记完成，重新打开再试一次", "warn")
+                self.dismiss_modal(rounds=2)
+                if not self.open_node(node):
+                    return False
+                self.br.wait(2000)
+                self.dismiss_modal()
+                st = self.wait_video(12) or st
+        return bool(node_id and self.node_done(node_id))
+
+    def _drag_to_end(self, st, settle=4.0):
+        """把当前可见播放器的进度分两步拖到结尾，等它真的 ended。"""
+        dur = 0.0
         for _ in range(3):
             if self._stopped():
                 return False
             s = self.video_state() or st
             dur = float(s.get("dur") or 0)
-            if dur < 1:
-                # 有的播放器要先 play 一次才有 duration
+            if dur >= 1:
+                break
+            # 有的播放器要先 play 一次才有 duration
+            self.p.evaluate(
+                "() => {" + _PICK_VIDEO + """
+                    const v = pick(); if (v) { v.muted = true; v.play().catch(()=>{}); }}"""
+            )
+            self.br.wait(2000)
+        if dur < 1:
+            return False
+
+        # 第一步：拖到一半（让平台看到进度变化）
+        self.p.evaluate(
+            "() => {" + _PICK_VIDEO + """
+                const v = pick(); if (!v) return;
+                v.muted = true; v.playbackRate = 1;
+                try { v.currentTime = v.duration * 0.5; } catch(e){}
+                v.play().catch(()=>{});}"""
+        )
+        self.br.wait(800)
+        self.dismiss_modal(rounds=1)
+        # 第二步：拖到结尾
+        self.p.evaluate(
+            "() => {" + _PICK_VIDEO + """
+                const v = pick(); if (!v) return;
+                try { v.currentTime = Math.max(0, (v.duration || 0) - 0.5); } catch(e){}
+                v.play().catch(()=>{});}"""
+        )
+        t0 = time.time()
+        while time.time() - t0 < 25:
+            if self._stopped():
+                return False
+            self.br.wait(1000)
+            s2 = self.video_state()
+            if not s2:
+                return False
+            if s2["end"] or (s2["dur"] and s2["cur"] >= s2["dur"] - 1):
+                self.br.wait(int(settle * 1000))   # 等平台把「完成」上报上去
+                return True
+            if s2["paused"]:
                 self.p.evaluate(
-                    """()=>{const v=document.querySelector('video');
-                        if(v){v.muted=true;v.play().catch(()=>{});}}"""
+                    "() => {" + _PICK_VIDEO + """
+                        const v = pick(); if (v) v.play().catch(()=>{}); }"""
                 )
-                self.br.wait(2000)
-                continue
-            # 第一步：拖到一半
-            self.p.evaluate(
-                """(d)=>{const v=document.querySelector('video'); if(!v) return;
-                    v.muted=true; v.playbackRate=1;
-                    try{ v.currentTime = d*0.5; }catch(e){}
-                    v.play().catch(()=>{});}""",
-                dur,
-            )
-            self.br.wait(800)
-            self.dismiss_modal(rounds=1)
-            # 第二步：拖到结尾
-            self.p.evaluate(
-                """(d)=>{const v=document.querySelector('video'); if(!v) return;
-                    try{ v.currentTime = Math.max(0, d-0.5); }catch(e){}
-                    v.play().catch(()=>{});}""",
-                dur,
-            )
-            t0 = time.time()
-            while time.time() - t0 < 25:
-                if self._stopped():
-                    return False
-                self.br.wait(1200)
-                s2 = self.video_state()
-                if not s2:
-                    break
-                if s2["end"] or (s2["dur"] and s2["cur"] >= s2["dur"] - 1):
-                    self.br.wait(int(settle * 1000))   # 等平台把「完成」上报上去
-                    return True
-                if s2["paused"]:
-                    self.p.evaluate(
-                        """()=>{const v=document.querySelector('video');
-                            v.play().catch(()=>{});}"""
-                    )
         return False
 
     def brush_doc(self, node):
@@ -443,10 +512,11 @@ class AiIcve:
                 self._log(f"  检测到弹窗：{modal[:80]}", "warn")
                 self.dismiss_modal(prefer_resume=False, rounds=2)
             s = self.p.evaluate(
-                """()=>{const v=document.querySelector('video');
-                    return v?{end:v.ended,cur:v.currentTime,paused:v.paused,dur:v.duration||0,
+                "() => {" + _PICK_VIDEO + """
+                    const v = pick();
+                    return v ? {end:v.ended,cur:v.currentTime,paused:v.paused,dur:v.duration||0,
                     ready:v.readyState,err:v.error?v.error.code:null,
-                    fail:document.body.innerText.includes('视频播放失败')}:null;}"""
+                    fail:document.body.innerText.includes('视频播放失败')} : null;}"""
             )
             if not s or (s.get("dur", 0) == 0 and s.get("ready", 0) == 0):
                 vi += 1
@@ -466,8 +536,11 @@ class AiIcve:
                 self.br.shot(f"watch_next_{vi:03d}")
                 continue
             if s["paused"] and s["ready"] >= 2:
-                self.p.evaluate("""()=>{const v=document.querySelector('video');
-                    v.muted=true;v.playbackRate=1;v.play().catch(()=>{});}""")
+                self.p.evaluate(
+                    "() => {" + _PICK_VIDEO + """
+                        const v = pick();
+                        if (v) { v.muted = true; v.playbackRate = 1; v.play().catch(()=>{}); }}"""
+                )
             if progress_cb:
                 # 用已播时长粗估进度
                 elapsed = (time.time() - t0) / 60.0
