@@ -14,6 +14,7 @@ import re
 import time
 
 from config import AI_ICVE_HOME
+from core.kinds import KIND_LABEL, kind_of_name
 
 # 页面上可能同时存在多个 video（上一个资源留下的播放器只是隐藏，并没有被移除）。
 # 一旦 querySelector('video') 抓到那个旧的，就会出现「日志说刷完了、网页还在放上一个视频」，
@@ -157,20 +158,23 @@ class AiIcve:
         return total
 
     def list_resources(self):
-        """枚举资源节点：返回 [{id,name,type,done}]。"""
-        return self.p.evaluate(
+        """枚举资源节点：返回 [{id,name,kind,done}]。
+
+        类型按名字判定（core/kinds.py）：视频、文档之外的「测验/作业/讨论」
+        会被标成 quiz —— 这些不能靠拖进度条完成，必须自己在网页里答题。
+        """
+        raw = self.p.evaluate(
             """() => [...document.querySelectorAll('div.node')].filter(n=>n.id && n.querySelector('p.title'))
                 .map(n=>{
                     const name=(n.querySelector('p.title').textContent||'').trim();
-                    let type='other';
-                    if(/\\.(mp4|mov)$/i.test(name)) type='video';
-                    else if(/\\.(pdf|doc|docx|ppt|pptx)$/i.test(name)) type='doc';
                     const mark=n.querySelector('i[class*=checkmark]');
                     const cls=mark?String(mark.className):'';
-                    const done=cls.includes('wc');
-                    return {id:n.id,name,type,done};
+                    return {id:n.id, name, done:cls.includes('wc')};
                 })"""
         )
+        for r in raw:
+            r["kind"] = kind_of_name(r["name"])
+        return raw
 
     # ---------- 刷课 ----------
     def video_state(self):
@@ -294,6 +298,7 @@ class AiIcve:
             if self._stopped():
                 return False
             self.br.wait(15000)
+            self.br.guard_flush()
             s = self.p.evaluate(
                 "() => {" + _PICK_VIDEO + """
                     const v = pick();
@@ -334,7 +339,8 @@ class AiIcve:
             self._log("  节点已失效（目录可能重排），跳过", "warn")
             return False
         self.br.wait(1500)
-        self.dismiss_modal()          # 打开之后才弹的续播询问
+        self.dismiss_modal()          # 打开之后才弹的续播询问（看门狗已自动处理过就走空）
+        self.br.guard_flush()
         st = self.wait_video(20)
         if not st:
             self._log("  未出现播放器，跳过", "warn")
@@ -401,6 +407,7 @@ class AiIcve:
             if self._stopped():
                 return False
             self.br.wait(1000)
+            self.br.guard_flush()
             s2 = self.video_state()
             if not s2:
                 return False
@@ -414,8 +421,57 @@ class AiIcve:
                 )
         return False
 
+    def content_kind(self):
+        """当前内容区实际是什么：video / doc / ''（认不出来）。
+
+        icve 大量资源名没有扩展名（「第一节 大学生心理健康概述」可能就是视频），
+        光看名字判不出来，只能打开后按页面上真实出现的播放器/预览容器判断。
+        """
+        try:
+            return self.p.evaluate(
+                """() => {
+                    const vis = e => e && e.offsetParent !== null &&
+                                     e.getBoundingClientRect().width > 40;
+                    const vs = [...document.querySelectorAll('video')].filter(
+                        v => vis(v) && (v.duration || 0) > 0);
+                    if (vs.length) return 'video';
+                    const fr = [...document.querySelectorAll('iframe')].filter(
+                        f => vis(f) && f.getBoundingClientRect().width > 300);
+                    if (fr.length) return 'doc';
+                    const cv = [...document.querySelectorAll('canvas')].filter(
+                        c => vis(c) && c.getBoundingClientRect().width > 300);
+                    if (cv.length) return 'doc';
+                    return '';
+                }"""
+            ) or ""
+        except Exception:
+            return ""
+
+    def brush_unknown(self, node):
+        """名字判不出类型：先打开，看真实内容再决定怎么刷。认不出来就如实跳过。"""
+        self.dismiss_modal(rounds=2)
+        if not self.open_node(node):
+            return False
+        self.br.wait(2500)
+        self.dismiss_modal()
+        self.br.guard_flush()
+        kind = ""
+        for _ in range(12):
+            if self._stopped():
+                return False
+            kind = self.content_kind()
+            if kind:
+                break
+            self.br.wait(900)
+        if kind == "video":
+            return self.skip_video(node)
+        if kind == "doc":
+            return self.brush_doc(node)
+        self._log("  认不出类型（既没有播放器也没有文档预览），跳过这一项", "warn")
+        return False
+
     def brush_doc(self, node):
-        """文档：点开，翻到末页，刷新记为完成。"""
+        """文档：点开，翻到末页，再回读目录标记确认真的记上了。"""
         self.dismiss_modal(rounds=2)
         if not self.open_node(node):
             return False
@@ -435,26 +491,47 @@ class AiIcve:
                 break
             self.br.wait(600)
         self.br.wait(1500)
+        self.br.shot("doc_last_page")
+        # v1.2.3：翻完不算完，得看目录里有没有变「已完成」
+        node_id = node.get("id")
+        if node_id:
+            return self._wait_done(node_id, timeout=12)
         return True
 
     def brush_all(self, only_undone=True, progress_cb=None):
-        """刷完所有资源（视频+文档）。返回统计。
+        """刷完所有视频/文档资源，返回统计。
 
-        v1.0.5：
-        - 视频改为「拖进度条到末尾」，不再真实播放，速度快很多；
-        - 全程自动处理「检测到上次播放…是否继续？」弹窗；
-        - 待刷为 0 时明确说明「已全部完成」，不再输出让人误会的「处理 0 项」。
+        v1.2.3：不再把「测验/作业/讨论」当资源刷 —— 那类节点拖进度条根本不算完成，
+        以前会把它们逐项标成「× 未确认完成」，看着像刷课失败。现在单独统计并明确提示
+        「这几项要你自己去答」。视频仍然拖进度条到末尾，文档翻到末页。
         """
         self.expand_all()
         items = self.list_resources()
-        undone = [x for x in items if not x["done"]]
-        todo = list(items) if not only_undone else undone
-        already = len(items) - len(undone)
+        quizzes = [x for x in items if x["kind"] == "quiz"]
+        brushable = [x for x in items if x["kind"] != "quiz"]
+        undone = [x for x in brushable if not x["done"]]
+        todo = list(brushable) if not only_undone else undone
+        already = len(brushable) - len(undone)
+
+        summary = f"资源共 {len(items)} 项：视频/文档 {len(brushable)} 项（已完成 {already} 项）"
+        if quizzes:
+            summary += f"，测验/作业 {len(quizzes)} 项（需自己作答，不自动处理）"
+        self._log(summary)
+
+        if quizzes:
+            for q in quizzes[:8]:
+                self._log(f"  · 需自己答：{q['name'][:46]}" +
+                          ("（已完成）" if q["done"] else ""))
+            if len(quizzes) > 8:
+                self._log(f"  · 另有 {len(quizzes) - 8} 项题目类资源，见网页目录")
+
         if not todo:
-            self._log(f"资源共 {len(items)} 项，已全部完成（{already}/{len(items)}），无需刷课")
+            self._log(f"视频/文档已全部完成（{already}/{len(brushable)}），无需刷课")
             return {"total": len(items), "todo": 0, "ok": 0,
-                    "done_after": already, "total_after": len(items)}
-        self._log(f"资源共 {len(items)} 项（已完成 {already} 项），本次待刷 {len(todo)} 项")
+                    "done_after": already, "total_after": len(brushable),
+                    "quiz": [x["name"] for x in quizzes]}
+
+        self._log(f"本次待刷 {len(todo)} 项")
 
         ok_n = 0
         for i, node in enumerate(todo, 1):
@@ -462,27 +539,32 @@ class AiIcve:
                 break
             if progress_cb:
                 progress_cb(i, len(todo), node["name"])
-            self._log(f"[{i}/{len(todo)}] {node['name'][:40]} ({node['type']})")
-            if node["type"] == "video":
+            self._log(f"[{i}/{len(todo)}] {node['name'][:40]} ({KIND_LABEL.get(node['kind'], '资源')})")
+            self.br.guard_flush()
+            if node["kind"] == "video":
                 done = self.skip_video(node)
-            elif node["type"] == "doc":
+            elif node["kind"] == "doc":
                 done = self.brush_doc(node)
             else:
-                done = False
+                done = self.brush_unknown(node)
             if done:
                 ok_n += 1
                 self._log(f"  ✓ 已完成")
             else:
                 self._log(f"  × 未确认完成，稍后可点「⑤ 复核完成情况」检查", "warn")
             self.br.shot(f"brush_{i:03d}")
+            self.br.guard_flush()
 
         # 收尾复核：重新读一遍目录里的完成标记
         self.expand_all()
         after = self.list_resources()
         done_after = sum(1 for x in after if x["done"])
         self._log(f"刷课结束：本次处理 {ok_n}/{len(todo)} 项，目录标记完成 {done_after}/{len(after)}")
+        if quizzes:
+            self._log(f"提醒：还有 {len(quizzes)} 项测验/作业需要你在网页里自己作答，本工具不代答")
         return {"total": len(items), "todo": len(todo), "ok": ok_n,
-                "done_after": done_after, "total_after": len(after)}
+                "done_after": done_after, "total_after": len(after),
+                "quiz": [x["name"] for x in quizzes]}
 
     # ---------- 刷时长 ----------
     def brush_watch_time(self, target_hours=5.0, max_minutes=300, progress_cb=None):
@@ -491,10 +573,12 @@ class AiIcve:
         self._log(f"起始 观看时长={h0}时 学习次数={c0}")
         if h0 is not None and h0 >= target_hours:
             return {"start": h0, "end": h0, "reached": True}
+        # 刷时长要从 0 开始计时，续播弹窗优先点「重新开始」
+        self.br.guard_set(prefer_resume=False)
         if not self.enter_course():
             return {"start": h0, "end": h0, "reached": False, "error": "进入课程失败"}
         self.expand_all()
-        vids = [x for x in self.list_resources() if x["type"] == "video"]
+        vids = [x for x in self.list_resources() if x["kind"] == "video"]
         if not vids:
             return {"start": h0, "end": h0, "reached": False, "error": "未找到视频"}
         self._log(f"视频 {len(vids)} 个，开始连续真实播放")
@@ -506,6 +590,7 @@ class AiIcve:
             if self._stopped():
                 break
             self.br.wait(20000)
+            self.br.guard_flush()
             modal = self.br.visible_modal_text()
             if modal:
                 self.br.shot("watch_modal")
