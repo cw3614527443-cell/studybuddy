@@ -37,6 +37,18 @@ _PNG = os.path.abspath(os.path.join("assets", "icon.png"))
 if os.path.exists(_PNG):
     _datas.append((_PNG, "assets"))
 
+# 学习通脚本套件：原样带上（含 README），运行时由 chaoxing_adapter 加载。
+_SUITE = os.path.abspath(os.path.join("chaoxing"))
+if os.path.isdir(_SUITE):
+    for root, _dirs, files in os.walk(_SUITE):
+        for f in files:
+            if f.endswith('.pyc') or '__pycache__' in root:
+                continue
+            src = os.path.join(root, f)
+            rel = os.path.relpath(root, _SUITE)
+            dst = "chaoxing" if rel == "." else os.path.join("chaoxing", rel)
+            _datas.append((src, dst))
+
 # 去重
 _seen = set()
 _datas2 = []

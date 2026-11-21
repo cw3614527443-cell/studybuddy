@@ -9,6 +9,45 @@
 
 ---
 
+## v1.5.0 —— 2026-11-21
+
+### 新增：学习通脚本套件整合进软件
+
+用户提供了一套已在真机跑通的 `chaoxing-suite-v1.4`（Node 常驻驱动 + Python 脚本：目录解析 /
+视频 / 测验 / 章节内嵌测验 / 统一入口）。本次按**不重写已验证逻辑**的原则整体收进
+`chaoxing/`，只做软件化封装：
+
+- `agent.mjs` 改为优先从环境变量 `SB_PW_ENTRY` 动态导入 `playwright-core`。
+  这样复用 PyInstaller 已经打进来的 `playwright/driver/node.exe` 与 driver 包，
+  使用者不必另装 Node 22 / npm；找不到时仍回落到原来的 `import 'playwright-core'`。
+- 浏览器内核查找补上 Edge（国内机器多数只有 Edge）；新增 `quit` 指令，
+  退出软件时先回执再 `ctx.close()`，保证 cookie 落盘。
+- `client.py` 增加 `set_stop_check()` / `stopped()`，UI 的「停止当前任务」能穿透到
+  套件轮询、视频守播、采题填答循环；独立命令行运行时无影响。
+- `run.py` 抽出 `list_courses(b)`：只读个人空间课程卡片，供「扫描课程」使用，
+  并给 `open` 加精确课程名匹配，找不到就报错，不再偷偷打开第一门课。
+- `video.py` / `exam.py` / `chapter_quiz.py` 在循环里检查停止标志。
+
+**桥接层** `core/platforms/chaoxing_adapter.py`：
+
+- 管理常驻浏览器进程（独立 `userdata/chaoxing/profile`），把驱动与脚本的 stdout
+  全部转发到界面日志，并解析 `[i/n]` 进度与二维码截图路径；
+- `list_courses()` 按课程卡片的「任务点进度 x/y」标注可刷 / 无课；
+- `read_progress()` 进课程读任务点进度，没有表头时按目录条目估算；
+- `brush_course()` 走套件的 `--pending --skip-quiz`，返回结构与另外两个平台一致，
+  汇总时只认绿标，不把右侧目录橙色误判成没刷完；
+- `answer_quiz()` 把 `exam.export` 与 `chapter_quiz.export_nos` 的题目合并，
+  **软件自己调用「⚙ 大模型设置」里的接口**生成 `chaoxing-answers-v1` 答案集，
+  再交给套件填答/提交；缺答案直接中止，避免空卷。试运行只解析不点选。
+- 关闭浏览器 / 退出程序都会优雅停掉这个独立驱动。
+
+**任务与界面**：`TaskRunner` 增加 `platform="cx"` 分发；平台选择器加第三项「学习通」，
+课程扫描、进度、刷课、复核、答题复用同一套流程；「刷观看时长」仅 AI 优课可见；
+说明文案补充学习通必须播到结尾、窗口不能最小化、答题不依赖聊天窗口。
+
+**打包**：`build.spec` 把 `chaoxing/` 下全部脚本与 README 作为数据文件打进去；
+`APP_VERSION`、软件内更新日志、安装器版本同步到 1.5.0（按约定本轮**不打包**）。
+
 ## v1.4.4 —— 2026-11-21
 
 ### 新增：课程列表自动识别，课程名不再手输

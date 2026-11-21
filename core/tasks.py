@@ -13,6 +13,7 @@ import traceback
 from core.browser import Browser, EdgeProc
 from core.platforms.ai_icve import AiIcve
 from core.platforms.zjy2 import Zjy2
+from core.platforms.chaoxing_adapter import ChaoxingSuite
 
 
 def _login_expired(br):
@@ -30,6 +31,7 @@ class TaskRunner:
         self.thread = None
         self.browser = None          # 仅当前任务线程内有效
         self._edge_started = False   # 本进程是否拉起过 Edge
+        self.cx = None               # 学习通用独立浏览器驱动，不持有 Playwright 对象
 
     # ---------- 控制 ----------
     def is_running(self):
@@ -91,6 +93,12 @@ class TaskRunner:
             return "页面加载超时，请检查网络或稍后重试。"
         return msg
 
+    def chaoxing(self):
+        """学习通用自己常驻的浏览器驱动，和 Edge CDP 那套完全隔离。"""
+        if self.cx is None:
+            self.cx = ChaoxingSuite(self.bus)
+        return self.cx
+
     # ---------- 浏览器 ----------
     def ensure_browser(self, attach=False):
         """确保**当前任务线程**有一个可用的浏览器连接。
@@ -111,6 +119,12 @@ class TaskRunner:
 
     def close_browser(self):
         """关闭受控 Edge（用户主动点「关闭浏览器」，故允许连带关掉复用的窗口）。"""
+        if self.cx is not None:
+            try:
+                self.cx.close()
+            except Exception:
+                pass
+            self.cx = None
         if self.browser is not None:
             try:
                 self.browser.detach()
@@ -141,11 +155,20 @@ class TaskRunner:
         if t is not None and t.is_alive():
             t.join(timeout=wait)
         self.browser = None          # 不碰别人线程的对象，交给进程退出去清理
+        if self.cx is not None:
+            try:
+                self.cx.close()
+            except Exception:
+                pass
+            self.cx = None
         EdgeProc.kill(grace=3, force_any=True)
         self._edge_started = False
 
     # ---------- 业务动作（供 GUI 调用） ----------
-    def action_open_site(self, site_home, attach=False):
+    def action_open_site(self, site_home, attach=False, platform="ai"):
+        if platform == "cx":
+            self.bus.log("学习通使用独立浏览器窗口（有头运行，平台要求不能失焦）")
+            return self.chaoxing().login()
         br = self.ensure_browser()
         br.goto(site_home)
         br.wait(2500)
@@ -158,7 +181,19 @@ class TaskRunner:
 
         可刷 = 教学内容里有视频/文档（quiz 不算）；无课 = 教学内容为空。
         检测失败的不硬塞进列表，单独说明，避免误导用户。
+
+        学习通走套件自己的浏览器与个人空间课程卡片，不借用 Edge CDP。
         """
+        if platform == "cx":
+            self.bus.progress(10, "正在打开学习通个人空间…")
+            items = self.chaoxing().list_courses()
+            self.bus.courses(items, platform)
+            self.bus.progress(100, f"识别完成：{len(items)} 门")
+            msg = (f"学习通：识别 {len(items)} 门"
+                   f"（可刷 {sum(1 for x in items if x['brushable'])} / "
+                   f"无课 {sum(1 for x in items if not x['brushable'])}）")
+            self.bus.log(msg, "ok")
+            return msg
         br = self.ensure_browser()
         plat = AiIcve(br, self.bus) if platform == "ai" else Zjy2(br, self.bus)
         pname = "AI 优课" if platform == "ai" else "zjy2"
@@ -242,9 +277,21 @@ class TaskRunner:
         """读学习进度：有观看时长就读时长，没有就读刷课完成度。
 
         v1.4.2：以前读不到「观看时长」就直接报失败。但有相当一部分课程不计学时
-        （zjy2 全平台都没有这项统计），这时该给的是「已完成 x/y」。现在统一回退，
+        （zjy2 / 学习通都没有这项统计），这时该给的是「已完成 x/y」。现在统一回退，
         按钮也从「读取观看时长」改名「读取学习进度」。
         """
+        if platform == "cx":
+            self.bus.progress(20, "正在打开课程目录…")
+            done, total, err = self.chaoxing().read_progress(course_name)
+            if done is None:
+                self.bus.log(f"学习通进度没读到：{err}", "warn")
+                return "读取失败"
+            pct = int(round(done / total * 100)) if total else 0
+            self.bus.progress(100, f"完成度 {pct}%")
+            if err:
+                self.bus.log(err, "warn")
+            self.bus.log(f"学习通完成度 {done}/{total}（{pct}%）")
+            return f"完成度 {done}/{total}（{pct}%）"
         br = self.ensure_browser()
         if platform == "ai":
             plat = AiIcve(br, self.bus)
@@ -280,6 +327,11 @@ class TaskRunner:
         return f"完成度 {done}/{total}（{pct}%）"
 
     def action_brush_course(self, platform="ai", course_name="大学生心理健康"):
+        if platform == "cx":
+            self.bus.log("学习通：视频必须 1 倍速播到结尾，平台才认任务点；"
+                         "脚本会静音并自动处理失焦/续播弹窗")
+            res = self.chaoxing().brush_course(course_name)
+            return self._brush_summary(res)
         br = self.ensure_browser()
         br.install_guards(prefer_resume=True)
         self.bus.log("刷课期间：播放器自动静音，续播弹窗自动点「继续播放」")
@@ -297,8 +349,11 @@ class TaskRunner:
             plat = Zjy2(br, self.bus)
             res = plat.brush_all(progress_cb=cb)
 
+        return self._brush_summary(res)
+
+    def _brush_summary(self, res):
+        """三个平台共用的刷课结果播报，避免学习通接入后三套重复文案。"""
         if res.get("todo", 0) == 0:
-            # 全部已完成：这是正常情况，不能报成「处理 0 项」让人以为失败了
             self.bus.progress(100, "无需刷课")
             self.bus.log(f"该课程资源已全部完成（{res.get('done_after')}/{res.get('total')}），无需刷课")
             return f"已全部完成 {res.get('done_after')}/{res.get('total')}"
@@ -321,7 +376,10 @@ class TaskRunner:
         self.bus.log(f"完成：共 {res['total']} 项，处理 {res['ok']}/{res['todo']}")
         return f"共 {res['total']} 项，处理 {res['ok']}/{res['todo']}"
 
-    def action_watch_time(self, target_hours=5.0, max_minutes=300):
+    def action_watch_time(self, target_hours=5.0, max_minutes=300, platform="ai"):
+        if platform == "cx":
+            self.bus.log("学习通刷视频必须真实播到结尾，没有独立的「刷观看时长」入口", "warn")
+            return "学习通不支持刷观看时长"
         br = self.ensure_browser()
         br.install_guards(prefer_resume=False)
         self.bus.log("刷时长期间：播放器自动静音，续播弹窗自动点「重新开始」")
@@ -357,6 +415,25 @@ class TaskRunner:
 
     def action_answer_quiz(self, platform="ai", course_name="大学生心理健康", dry_run=False):
         """自动答题：软件自己调大模型读题作答（Key 来自「⚙ 大模型设置」）。"""
+        if platform == "cx":
+            from config import llm_config
+            cfg = llm_config()
+            res = self.chaoxing().answer_quiz(
+                course_name, dry_run=dry_run,
+                auto_submit=bool(cfg.get("auto_submit", True)) and not dry_run)
+            if res.get("error"):
+                self.bus.log(res["error"], "error")
+                return "答题失败"
+            if res.get("stopped"):
+                return "已停止答题"
+            if not res.get("todo"):
+                self.bus.log("没有需要作答的题目（测验都已完成或没采到题）")
+                return "无需作答"
+            if dry_run:
+                self.bus.log(f"试运行结束：预览 {res['todo']} 题，页面上未点选、未提交")
+                return f"试运行 {res['todo']} 题"
+            self.bus.log(f"学习通答题结束：提交 {res.get('ok', 0)}/{res['todo']} 套题")
+            return f"提交 {res.get('ok', 0)}/{res['todo']} 套题"
         from config import llm_config
         from core.llm import LLMClient
         from core.platforms.quiz_ai import QuizAI, NAV
@@ -415,6 +492,13 @@ class TaskRunner:
         return f"提交 {res.get('ok', 0)}/{res['todo']} 项"
 
     def action_verify(self, platform="ai", course_name="大学生心理健康"):
+        if platform == "cx":
+            done, total, err = self.chaoxing().read_progress(course_name)
+            if done is None or not total:
+                self.bus.log(f"复核失败：{err or '目录里没读到资源'}", "warn")
+                return "0/0（未读到资源）"
+            self.bus.log(f"复核：{done}/{total} 已完成")
+            return f"{done}/{total} 完成"
         br = self.ensure_browser()
         br.install_guards(prefer_resume=True)
         if platform == "ai":

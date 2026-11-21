@@ -38,6 +38,13 @@ class App:
                     "网速慢时会先等页面加载完再动手，日志里会显示「继续等…」。\n"
                     "刷课时自动静音、续播弹窗自动关；测验/作业需自己作答。",
         },
+        "cx": {
+            "host": "v8.chaoxing.com · mooc2",
+            "desc": "学习通：独立有头浏览器窗口，首次要扫二维码；不要最小化窗口。\n"
+                    "视频必须 1 倍速播到结尾平台才认任务点，耗时约等于视频总时长。\n"
+                    "支持扫描课程、读任务点进度、刷视频、大模型自动答题。\n"
+                    "测验答案由软件调用你配置的大模型生成，不需要切出来问答。",
+        },
     }
 
     def __init__(self, root):
@@ -207,7 +214,8 @@ class App:
                  font=W.font(8)).pack(side="right", pady=(p(2), 0))
 
         self.platform_var = tk.StringVar(value="ai")
-        self.seg = W.Segmented(body, options=[("ai", "AI 优课"), ("zjy2", "zjy2")],
+        self.seg = W.Segmented(body, options=[("ai", "AI 优课"), ("zjy2", "zjy2"),
+                                              ("cx", "学习通")],
                                value="ai", command=self._on_platform_change,
                                width=300, height=36)
         self.seg.pack(anchor="w", pady=(p(10), p(10)))
@@ -417,10 +425,11 @@ class App:
             if picker is not None:
                 picker.set_items([])
         if not self.runner.is_running():
-            ai = self.platform_var.get() == "ai"
-            # zjy2 没有学时统计、题目页也还没适配 → 这两项在 zjy2 下置灰
+            plat = self.platform_var.get()
+            ai = plat == "ai"
+            # zjy2 没适配答题；学习通视频必须播到结尾，没有单独的刷时长入口
             self._nav["watch"].config(state="normal" if ai else "disabled")
-            self._nav["quiz"].config(state="normal" if ai else "disabled")
+            self._nav["quiz"].config(state="normal" if plat in ("ai", "cx") else "disabled")
 
     def _on_courses(self, data):
         """后台扫描完课程列表，回填下拉框。"""
@@ -490,7 +499,9 @@ class App:
         messagebox.showinfo(
             "功能说明 · StudyBuddy",
             "① 启动浏览器 / 登录\n"
-            "    拉起一个受控的 Edge 窗口。第一次用要在里面扫码登录学习平台；\n"
+            "    AI 优课 / zjy2：拉起受控 Edge 窗口，首次在里面扫码登录。\n"
+            "    学习通：拉起独立的 Chrome/Edge 窗口（平台要求有头、不能失焦），\n"
+            "    首次要用学习通 App 扫二维码；扫码后日志会提示「已跳转」。\n"
             "    登录一次后，只要不点「关闭浏览器」，下次打开仍在登录状态。\n\n"
             "【扫描课程】选好平台后，点任务参数里的「扫描课程」\n"
             "    自动读取你在该平台的全部课程，列成下拉框；每项旁边标着\n"
@@ -500,7 +511,7 @@ class App:
             "② 读取学习进度\n"
             "    AI 优课先读首页的「观看时长 / 学习次数」；如果这门课不计学时\n"
             "    （页面上没有这项数字），会自动改为统计目录里的刷课完成度。\n"
-            "    zjy2 没有学时统计，直接读目录完成度（已完成 / 总数）。\n\n"
+            "    zjy2 / 学习通没有学时统计，直接读任务点完成度（已完成 / 总数）。\n\n"
             "③ 刷课（一键过完）\n"
             "    把目录里未完成的资源逐个打开：视频直接把进度条拖到末尾，\n"
             "    文档翻到最后一页。不耗真实观看时间，速度快。\n"
@@ -511,21 +522,28 @@ class App:
             "    · 视频的「检测到上次播放…是否继续？」和文档的「上次观看到第X页…」\n"
             "      两类续播弹窗都会自动点掉，日志会记一行；\n"
             "    · 连续 2 项进度都没涨会自动停止，不会在 0% 状态下白刷整门课；\n"
-            "    · 目录里的测验 / 作业 / 考试**不会自动作答**，会列出来提醒你自己做。\n\n"
-            "④ 刷观看时长\n"
+            "    · 目录里的测验 / 作业 / 考试不会自动作答，会列出来提醒你自己做。\n"
+            "    学习通：视频不能拖进度条，必须 1 倍速播到结尾（耗时≈视频时长）；\n"
+            "    脚本会静音、防失焦暂停、自动关续播弹窗，并只认视频上的绿标，\n"
+            "    不把右边目录的橙色误判成没刷完。窗口别最小化。\n\n"
+            "④ 刷观看时长（仅 AI 优课）\n"
             "    按目标学时真实播放视频（静音播放）。这一步不能拖进度条，拖了平台不计时长。\n"
-            "    浏览器窗口要保持开着（可以最小化），关掉就中断。\n\n"
+            "    浏览器窗口要保持开着（可以最小化），关掉就中断。\n"
+            "    学习通没有单独学时入口：③ 刷课本身就是播到结尾真实计时。\n\n"
             "⑤ 复核完成情况\n"
             "    统计目录里已完成 / 总数，用来确认刷课结果。\n\n"
             "⑥ 自动答题（大模型）\n"
             "    自动进「作业 / 测验 / 考试」，读题 → 大模型作答 → 点选填空 → 提交，\n"
             "    提交后会把得分记进日志。需要先在「⚙ 大模型设置」里填接口和 Key（用你自己的）。\n"
             "    第一次用请选「试运行」：只解析题目和答案、不点不交，核对无误再正式跑。\n"
-            "    考试默认不参与（限时且交卷不可改），要跑考试需在设置里勾选。\n\n"
+            "    考试默认不参与（限时且交卷不可改），要跑考试需在设置里勾选。\n"
+            "    学习通：题目来自课程自身的测验页（含章节内嵌测验），软件抓题后自己调\n"
+            "    大模型生成答案，再按题号逐题填答；缺答案会整卷跳过，不会空卷提交。\n\n"
             "【平台怎么选】看浏览器地址栏：\n"
             "    ai.icve.com.cn    → 选「AI 优课」。卡片式首页，有学时统计。\n"
             "    zjy2.icve.com.cn  → 选「zjy2」。树形目录，资源后面带百分比。\n"
-            "    两者都是智慧职教旗下的不同界面，选错会提示找不到元素。\n\n"
+            "    v8.chaoxing.com   → 选「学习通」。独立浏览器，扫码登录 mooc2 课程。\n"
+            "    三者页面结构完全不同，选错会提示找不到元素。\n\n"
             "【停止当前任务】随时可中止，已完成的资源不会回退。",
         )
 
@@ -565,9 +583,14 @@ class App:
             self.prog.set_value(0)
 
     def on_open_site(self):
+        platform = self.platform_var.get()
+
         def job():
+            if platform == "cx":
+                return self.runner.action_open_site("", platform="cx")
             self.bus.log("启动受控浏览器（首次需在弹出的窗口里登录）…")
-            return self.runner.action_open_site(AI_ICVE_HOME, attach=False)
+            return self.runner.action_open_site(AI_ICVE_HOME, attach=False,
+                                                platform=platform)
         self._run(job, nav="open")
 
     def on_read_time(self):
@@ -585,7 +608,8 @@ class App:
         except ValueError:
             messagebox.showerror("参数错误", "目标时长与最长挂机需为数字")
             return
-        self._run(lambda: self.runner.action_watch_time(h, m), nav="watch")
+        self._run(lambda: self.runner.action_watch_time(
+            h, m, platform=self.platform_var.get()), nav="watch")
 
     def on_verify(self):
         self._run(lambda: self.runner.action_verify(self.platform_var.get(),
