@@ -30,9 +30,12 @@ if os.path.isdir(_driver):
             rel = os.path.relpath(src, _pw_root)
             dst = os.path.join("playwright", os.path.dirname(rel))
             _datas.append((src, dst))
-# 图标同时打进包内，供 tkinter 设置窗口 / 任务栏图标
+# 图标同时打进包内：.ico 给窗口/任务栏，.png 给界面左上角 logo（PIL 缩放更清晰）
 if _ICON:
     _datas.append((_ICON, "assets"))
+_PNG = os.path.abspath(os.path.join("assets", "icon.png"))
+if os.path.exists(_PNG):
+    _datas.append((_PNG, "assets"))
 
 # 去重
 _seen = set()
