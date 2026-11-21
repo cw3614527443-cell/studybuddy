@@ -1,0 +1,38 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "运行 GUI",
+      "type": "shell",
+      "command": "D:\\python\\python.exe",
+      "args": ["main.py"],
+      "options": { "cwd": "${workspaceFolder}" },
+      "problemMatcher": [],
+      "group": "build"
+    },
+    {
+      "label": "无头自检",
+      "type": "shell",
+      "command": "D:\\python\\python.exe",
+      "args": ["main.py", "--selftest"],
+      "options": { "cwd": "${workspaceFolder}" },
+      "problemMatcher": [],
+      "group": "test"
+    },
+    {
+      "label": "打包成 exe",
+      "type": "shell",
+      "command": "D:\\python\\python.exe",
+      "args": [
+        "-m", "PyInstaller", "build.spec",
+        "--noconfirm",
+        "--distpath", "dist_new",
+        "--workpath", "build_new"
+      ],
+      "options": { "cwd": "${workspaceFolder}" },
+      "problemMatcher": [],
+      "group": "build",
+      "detail": "输出到 dist_new/，避免覆盖旧的 StudyBuddy-1.0.0-Windows"
+    }
+  ]
+}

@@ -1,0 +1,36 @@
+# ===== 运行时生成，含登录态，绝对不能入库 =====
+userdata/
+shots/
+logs/
+selftest_result.txt
+*.db-journal
+
+# ===== Python =====
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# ===== PyInstaller 打包产物 =====
+build/
+build*/
+dist/
+dist*/
+_internal/
+StudyBuddy-*-Windows/
+*.log
+*.spec.bak
+
+# ===== 发布包（体积大，走 Releases 而非仓库）=====
+*.zip
+*.7z
+*.exe
+*.dll
+*.pyd
+
+# ===== 编辑器 / 系统 =====
+.idea/
+.DS_Store
+Thumbs.db
+desktop.ini
