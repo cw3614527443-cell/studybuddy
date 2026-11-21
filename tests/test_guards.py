@@ -40,6 +40,13 @@ HTML = """<!doctype html><html><head><meta charset="utf-8">
   <button id="btn-resume">继续播放</button>
 </div>
 
+<div id="doc-resume" class="dlg" style="left:20%;top:36%">
+  <div>提示</div>
+  <div>上次观看到第23页，是否继续观看？</div>
+  <button id="btn-doc-cancel">取消</button>
+  <button id="btn-doc-ok">确定</button>
+</div>
+
 <div id="notice" class="dlg">
   <div>系统公告</div>
   <div>今晚 23:00 维护，请提前保存</div>
@@ -48,10 +55,14 @@ HTML = """<!doctype html><html><head><meta charset="utf-8">
 
 <script>
   window.__clicks = [];
-  for (const id of ['btn-restart', 'btn-resume', 'btn-ok']) {
+  for (const id of ['btn-restart', 'btn-resume', 'btn-ok',
+                    'btn-doc-ok', 'btn-doc-cancel']) {
     document.getElementById(id).addEventListener('click', () => {
       window.__clicks.push(id);
-      if (id !== 'btn-ok') document.getElementById('resume').style.display = 'none';
+      if (id === 'btn-resume' || id === 'btn-restart')
+        document.getElementById('resume').style.display = 'none';
+      if (id === 'btn-doc-ok' || id === 'btn-doc-cancel')
+        document.getElementById('doc-resume').style.display = 'none';
     });
   }
 </script>
@@ -97,12 +108,13 @@ def main():
 
         ok &= check("已有播放器立刻被静音",
                     page.evaluate("() => document.getElementById('v1').muted") is True)
-        ok &= check("续播弹窗被自动点掉（继续播放）",
-                    page.evaluate("() => window.__clicks") == ["btn-resume"],
-                    str(page.evaluate("() => window.__clicks")))
-        ok &= check("计数里记下了这一次", page.evaluate("() => window.__sbGuard.modal") >= 1)
-        ok &= check("普通公告弹窗没被误点",
-                    "btn-ok" not in page.evaluate("() => window.__clicks"))
+        clicks = page.evaluate("() => window.__clicks")
+        ok &= check("视频续播弹窗被自动点掉（继续播放）",
+                    "btn-resume" in clicks and "btn-restart" not in clicks, str(clicks))
+        ok &= check("文档续播弹窗「上次观看到第23页」被点「确定」",
+                    "btn-doc-ok" in clicks and "btn-doc-cancel" not in clicks, str(clicks))
+        ok &= check("计数里记下了这两次", page.evaluate("() => window.__sbGuard.modal") >= 2)
+        ok &= check("普通公告弹窗没被误点", "btn-ok" not in clicks, str(clicks))
 
         # 新插入的播放器（切资源时平台会新建 video）
         page.evaluate("""() => {
@@ -135,9 +147,11 @@ def main():
         page2.wait_for_timeout(200)
         install_guard(page2, prefer_resume=False)
         page2.wait_for_timeout(1500)
-        ok &= check("刷时长模式点的是「重新开始」",
-                    page2.evaluate("() => window.__clicks") == ["btn-restart"],
-                    str(page2.evaluate("() => window.__clicks")))
+        clicks2 = page2.evaluate("() => window.__clicks")
+        ok &= check("刷时长模式视频点的是「重新开始」",
+                    "btn-restart" in clicks2 and "btn-resume" not in clicks2, str(clicks2))
+        ok &= check("刷时长模式文档弹窗照样被关",
+                    "btn-doc-ok" in clicks2, str(clicks2))
 
         # ---------- 3. 导航后仍然生效 + Browser 层封装 ----------
         page3 = browser.new_page(viewport={"width": 1200, "height": 800})
@@ -160,12 +174,12 @@ def main():
 
         # 重新加载（SPA 里 reload / 换课程都会发生）后脚本应自动再注入
         page3.reload()
-        page3.wait_for_timeout(800)
+        page3.wait_for_timeout(1700)   # 看门狗有 900ms 点击冷却，两个弹窗分两轮点
         ok &= check("导航后看门狗仍在（init script 生效）",
                     page3.evaluate("() => !!window.__sbGuard") is True)
-        ok &= check("导航后弹窗照样被关掉",
-                    page3.evaluate("() => window.__clicks") == ["btn-resume"],
-                    str(page3.evaluate("() => window.__clicks")))
+        clicks3 = page3.evaluate("() => window.__clicks")
+        ok &= check("导航后视频/文档弹窗照样被关掉",
+                    "btn-resume" in clicks3 and "btn-doc-ok" in clicks3, str(clicks3))
 
         # 任务结束：解除强制静音，别再跟用户抢音量
         br.release_guards()

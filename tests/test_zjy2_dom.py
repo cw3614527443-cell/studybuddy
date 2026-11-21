@@ -238,6 +238,34 @@ def main():
         ok &= check("拿到时长后判定为可刷视频", z._ready_kind(st) == ("video", True),
                     str(z._ready_kind(st)))
 
+        # 15. 文档续播弹窗「上次观看到第23页，是否继续观看？」→ 点「确定」
+        page.evaluate("""() => {
+            const d = document.createElement('div');
+            d.id = 'docdlg';
+            d.style.cssText = 'position:fixed;left:30%;top:30%;width:320px;' +
+                              'z-index:999;background:#fff;padding:12px';
+            d.innerHTML = '<div>提示</div><div>上次观看到第23页，是否继续观看？</div>' +
+                          '<button id="dcancel">取消</button><button id="dok">确定</button>';
+            document.body.appendChild(d);
+            window.__docclicks = [];
+            document.getElementById('dok').onclick = () => window.__docclicks.push('ok');
+            document.getElementById('dcancel').onclick = () => window.__docclicks.push('cancel');
+        }""")
+        ok &= check("文档续播弹窗被识别", z._dismiss_doc_resume() is True)
+        doc_clicks = page.evaluate("() => window.__docclicks")
+        ok &= check("点的是「确定」而不是「取消」", doc_clicks == ["ok"], str(doc_clicks))
+
+        # 16. 弹窗挡住「下一页」时不能谎报已刷完
+        page.evaluate("""() => {
+            const d = document.getElementById('docdlg');
+            if (d) d.remove();
+            document.querySelector('#pages').textContent = '2 / 20';
+            // 页面上没有「下一页」按钮 → _click_next_page() 返回 False
+        }""")
+        res = z._read_doc(z._content_state())
+        ok &= check("翻页按钮点不动时判为失败",
+                    res["ok"] is False and "翻页" in res["note"], str(res))
+
         browser.close()
 
     print("\n结果：" + ("全部通过" if ok else "存在失败项"))

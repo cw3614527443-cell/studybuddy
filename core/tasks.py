@@ -15,6 +15,14 @@ from core.platforms.ai_icve import AiIcve
 from core.platforms.zjy2 import Zjy2
 
 
+def _login_expired(br):
+    """浏览器是否停在平台登录页（登录态过期）。兼容不支持该方法的老对象/测试桩。"""
+    try:
+        return bool(br.on_login_page())
+    except Exception:
+        return False
+
+
 class TaskRunner:
     def __init__(self, bus, on_finish=None):
         self.bus = bus
@@ -145,17 +153,77 @@ class TaskRunner:
         self.bus.log(f"已打开：{site_home}")
         return "已打开页面"
 
-    def action_read_time(self, platform="ai"):
-        br = self.ensure_browser()
-        plat = AiIcve(br, self.bus) if platform == "ai" else Zjy2(br, self.bus)
+    def _course_progress(self, platform="ai", course_name="大学生心理健康", br=None):
+        """统计课程完成度：已完成项 / 总项。
+
+        用于「没有观看时长统计」的课程（zjy2 全平台，以及 AI 优课里不计学时的
+        课程）。返回 (done, total, err)；读不到时 done 为 None。
+        """
+        br = br or self.ensure_browser()
         if platform == "ai":
-            h, c = plat.read_watch()
-            if h is None:
-                self.bus.log("未能读取到观看时长，请确认已登录且页面正常", "warn")
-                return "读取失败"
-            self.bus.log(f"观看时长 {h} 时，学习次数 {c}")
-            return f"观看时长 {h} 时 / {c} 次"
-        return "zjy2 无观看时长统计"
+            plat = AiIcve(br, self.bus)
+            # 必须先进入课程再展开目录，否则停在首页只会数到 0 项
+            if not plat.enter_course(course_name):
+                if _login_expired(br):
+                    return None, 0, "登录状态已失效（当前停在登录页）"
+                return None, 0, f"进入课程「{course_name}」失败"
+        else:
+            plat = Zjy2(br, self.bus)
+        self.bus.progress(30, "统计目录完成度…")
+        res = plat.verify()
+        if self.bus.should_stop():
+            return None, 0, "已请求停止"
+        total = res.get("total", 0)
+        done = res.get("done", 0)
+        if total == 0:
+            if _login_expired(br):
+                return None, 0, "登录状态已失效（当前停在登录页）"
+            return None, 0, "目录里没读到任何资源节点（课程未展开或页面还在加载）"
+        pct = int(round(done / total * 100))
+        self.bus.log(f"课程完成度 {done}/{total}（{pct}%）")
+        self.bus.progress(100, f"完成度 {pct}%")
+        return done, total, ""
+
+    def action_read_time(self, platform="ai", course_name="大学生心理健康"):
+        """读学习进度：有观看时长就读时长，没有就读刷课完成度。
+
+        v1.4.2：以前读不到「观看时长」就直接报失败。但有相当一部分课程不计学时
+        （zjy2 全平台都没有这项统计），这时该给的是「已完成 x/y」。现在统一回退，
+        按钮也从「读取观看时长」改名「读取学习进度」。
+        """
+        br = self.ensure_browser()
+        if platform == "ai":
+            plat = AiIcve(br, self.bus)
+            h, c = plat.read_watch(quiet=True)
+            if h is not None:
+                self.bus.log(f"观看时长 {h} 时，学习次数 {c}")
+                return f"观看时长 {h} 时 / {c} 次"
+            if _login_expired(br):
+                # read_watch 已经报了「登录状态已失效」，这里补一句怎么办
+                self.bus.log("请点「① 启动浏览器 / 登录」重新扫码后再试", "error")
+                return "未登录"
+            self.bus.log("这门课没有「观看时长」统计（部分课程不计学时），改为读取刷课完成度…",
+                         "warn")
+        else:
+            if _login_expired(br):
+                self.bus.log("登录状态已失效：当前停在平台登录页，"
+                             "请点「① 启动浏览器 / 登录」重新扫码后再试", "error")
+                return "未登录"
+            self.bus.log("zjy2 没有学时统计，读取刷课完成度…")
+
+        done, total, err = self._course_progress(platform, course_name, br)
+        if done is None:
+            if err == "已请求停止":
+                self.bus.log("已停止统计完成度", "warn")
+                return "已停止"
+            if "登录" in err:
+                self.bus.log("登录状态已失效：请点「① 启动浏览器 / 登录」重新扫码后再试",
+                             "error")
+                return "未登录"
+            self.bus.log(f"完成度也没读到：{err}。请确认已登录、课程名正确、页面正常", "warn")
+            return "读取失败"
+        pct = int(round(done / total * 100))
+        return f"完成度 {done}/{total}（{pct}%）"
 
     def action_brush_course(self, platform="ai", course_name="大学生心理健康"):
         br = self.ensure_browser()
@@ -180,6 +248,12 @@ class TaskRunner:
             self.bus.progress(100, "无需刷课")
             self.bus.log(f"该课程资源已全部完成（{res.get('done_after')}/{res.get('total')}），无需刷课")
             return f"已全部完成 {res.get('done_after')}/{res.get('total')}"
+
+        if res.get("aborted"):
+            self.bus.progress(100, "已中止")
+            self.bus.log(f"已提前中止：只确认 {res['ok']}/{res['todo']} 项。"
+                         "请先处理弹窗 / 登录问题再重试③，不要直接接着刷", "error")
+            return f"已中止（确认 {res['ok']}/{res['todo']}）"
 
         self.bus.progress(100, "刷课完成")
         quiz = res.get("quiz") or []
@@ -218,7 +292,7 @@ class TaskRunner:
             # v1.0.6：绝不再显示 "5.16 → None 时"。说明白「播放了多少 / 数字为什么没读到 / 怎么办」
             self.bus.log(
                 f"结束：本次真实播放 {mins_txt}；最终数字这次没读到（页面未渲染或掉登录）。"
-                "已播放的学时会由平台记录，重新点「② 读取观看时长」即可看到最新数字", "warn")
+                "已播放的学时会由平台记录，重新点「② 读取学习进度」即可看到最新数字", "warn")
             return f"本次播放 {mins_txt}（最终数字未读取，点②可刷新）"
         self.bus.log(f"结束：{start} → {end} 时（本次真实播放 {mins_txt}）")
         if res.get("reached"):

@@ -491,6 +491,37 @@ class Zjy2:
         return False
 
     # ---------- 刷课 ----------
+    def _dismiss_doc_resume(self):
+        """关文档类续播弹窗「上次观看到第X页，是否继续观看？」→ 点「确定」。
+
+        只看按钮所在浮层的文案，普通公告里的「确定」不会被误点。
+        """
+        try:
+            return bool(self.p.evaluate(
+                """() => {
+                    const vis = e => {
+                        const r = e.getBoundingClientRect();
+                        return r.width > 1 && r.height > 1 &&
+                               getComputedStyle(e).visibility !== 'hidden';
+                    };
+                    for (const b of document.querySelectorAll(
+                            'button,[role=button],a,[class*=btn],[class*=button]')) {
+                        if (!vis(b) || (b.textContent || '').trim() !== '确定') continue;
+                        let p = b, i = 0, hit = false;
+                        while (p && i++ < 10) {
+                            if (/上次观看到|上次阅读到|上次浏览到/.test(p.innerText || '')) {
+                                hit = true; break;
+                            }
+                            p = p.parentElement;
+                        }
+                        if (hit) { b.click(); return true; }
+                    }
+                    return false;
+                }"""
+            ))
+        except Exception:
+            return False
+
     def _dismiss_resume(self):
         """兜底关续播弹窗（正常由页面内看门狗处理，这里防它没跑到）。"""
         for label in ("继续播放", "重新开始"):
@@ -499,6 +530,8 @@ class Zjy2:
                     self.br.wait(700)
                 else:
                     break
+        if self._dismiss_doc_resume():
+            self.br.wait(700)
 
     def _learn_current(self, name=""):
         """处理当前打开的资源：视频拖到末尾 / 文档翻到末页。
@@ -523,17 +556,26 @@ class Zjy2:
         pages = st.get("pages") or {}
         cur, tot = pages.get("cur"), pages.get("tot")
 
+        moved = 0
         if tot and tot > 1:
             for _ in range(tot + 10):
                 if self._stopped():
                     return {"kind": "doc", "ok": False, "note": "已停止"}
                 if not self._click_next_page():
                     break
+                moved += 1
                 self.br.wait(650)
                 now = self._doc_pages()
                 if now and now["cur"] >= now["tot"]:
                     break
             self.br.wait(800)
+            # v1.4.3：弹窗盖住预览时「下一页」根本点不动，以前照样返回 ok，
+            # 进度一直 0% 却继续往下刷。这里必须判定为没刷到，让调用方重试。
+            now = self._doc_pages()
+            if moved == 0 and now and now["cur"] < now["tot"]:
+                return {"kind": "doc", "ok": False,
+                        "note": f"停在第 {now['cur']}/{now['tot']} 页，翻页按钮点不动"
+                                "（可能被弹窗挡住）"}
         else:
             # 单页文档 / 没有页码的预览：往下滚一遍并停留一会儿
             self._scroll_content(5)
@@ -744,6 +786,8 @@ class Zjy2:
                     "failed": [], "quiz": [x["name"] for x in quizzes]}
 
         ok, ran, failed = 0, 0, []
+        fail_streak = 0          # 连续「进度没涨」的项数
+        aborted = False          # 是否因系统性问题提前中止
         for i, r in enumerate(todo, 1):
             if self._stopped():
                 break
@@ -797,14 +841,24 @@ class Zjy2:
 
             if confirmed is True:
                 ok += 1
+                fail_streak = 0
                 self._log("  ✓ 已完成")
             elif confirmed is None and executed:
+                fail_streak = 0
                 self._log("  ✓ 已刷完（当前页读不到进度，结尾统一复核）")
             else:
                 failed.append(r["name"])
+                fail_streak += 1
                 self._log("  × 未确认完成，稍后可点「⑤ 复核」再查", "warn")
             self.br.shot(f"brush_{i:03d}")
             self.br.guard_flush()
+
+            if fail_streak >= 2:
+                aborted = True
+                self._log("连续 2 项进度都没涨：多半是弹窗没关掉、登录失效或平台没记录。"
+                          "已停止刷后面的资源，避免整轮白刷；处理完提示后重试", "error")
+                self.br.shot("brush_aborted")
+                break
 
         # 收尾：回目录复核真实完成数
         self.go_index()
@@ -812,9 +866,10 @@ class Zjy2:
         after = self.list_resources()
         done_after = sum(1 for x in after if x["pct"] >= 100)
         self._log(f"刷课结束：本次执行 {ran}/{len(todo)} 项，当场确认 {ok} 项，"
-                  f"目录标记完成 {done_after}/{len(after)}")
+                  f"目录标记完成 {done_after}/{len(after)}"
+                  + ("（已提前中止）" if aborted else ""))
         if quizzes:
             self._log(f"提醒：还有 {len(quizzes)} 项测验/作业需要你在网页里自己作答，本工具不代答")
         return {"total": len(items), "todo": len(todo), "ok": ok, "ran": ran,
                 "done_after": done_after, "total_after": len(after), "failed": failed,
-                "quiz": [x["name"] for x in quizzes]}
+                "aborted": aborted, "quiz": [x["name"] for x in quizzes]}
