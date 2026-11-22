@@ -460,6 +460,47 @@ class Browser:
             time.sleep(0.5)
         return False
 
+    def wait_course_tab(self, course_name, timeout=25):
+        """等「刚点开的那个标签页」真的变成课程页。
+
+        v1.8.0：AI 优课点课程卡片的跳转链是
+        列表页 → `zjy2.icve.com.cn/admin/pedding?...`（中间页，5~10 秒）
+        → `spoccourseZstp` → 点「教学内容」→ `spoccourseIndex`。
+        以前只等 8 秒，正好卡在中间页上，于是账号里第一门课
+        永远「检测失败，已跳过」。这里按课程名轮询，等它落地。
+        """
+        t0 = time.time()
+        fallback = None
+        while time.time() - t0 < timeout:
+            try:
+                pages = list(self.ctx.pages or [])
+            except Exception:
+                return False
+            for p in reversed(pages):
+                try:
+                    url = p.url or ""
+                except Exception:
+                    continue
+                if "spoccourse" not in url:
+                    continue
+                try:
+                    text = p.evaluate(
+                        "() => ((document.querySelector('.info_title')||document.body)"
+                        ".innerText||'').slice(0,400)"
+                    ) or ""
+                except Exception:
+                    text = ""
+                if course_name and course_name in text:
+                    self.page = p
+                    return True
+                if fallback is None:      # 名字还没渲染出来，先记着兜底
+                    fallback = p
+            time.sleep(0.5)
+        if fallback is not None:
+            self.page = fallback
+            return True
+        return False
+
     def close_extra_tabs(self, keep_url_substr=None):
         """关掉多余标签页，只保留含 keep_url_substr 的那个（没有则保留当前页）。
 

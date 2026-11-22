@@ -238,7 +238,10 @@ def main():
         ok &= check("拿到时长后判定为可刷视频", z._ready_kind(st) == ("video", True),
                     str(z._ready_kind(st)))
 
-        # 15. 文档续播弹窗「上次观看到第23页，是否继续观看？」→ 点「确定」
+        # 15. 文档续播弹窗「上次观看到第23页，是否继续观看？」→ 点「取消」
+        #     v1.8.0 真机结论：点「确定」跳到上次页码之后，页码控件就再也读不到了
+        #     （_doc_pages() 恒为 None），后续「翻到第几页/是否刷完」全瞎、clicks 一直是 0；
+        #     点「取消」= 从第 1 页开始翻，页码正常可读。所以这里钉死「必须点取消」。
         page.evaluate("""() => {
             const d = document.createElement('div');
             d.id = 'docdlg';
@@ -253,7 +256,7 @@ def main():
         }""")
         ok &= check("文档续播弹窗被识别", z._dismiss_doc_resume() is True)
         doc_clicks = page.evaluate("() => window.__docclicks")
-        ok &= check("点的是「确定」而不是「取消」", doc_clicks == ["ok"], str(doc_clicks))
+        ok &= check("点的是「取消」而不是「确定」", doc_clicks == ["cancel"], str(doc_clicks))
 
         # 16. 弹窗挡住「下一页」时不能谎报已刷完
         page.evaluate("""() => {

@@ -240,8 +240,9 @@ class TaskRunner:
     def action_list_courses(self, platform="ai"):
         """扫描「我的课程」页，逐门检测有无可刷资源，回传带标注的列表。
 
-        可刷 = 教学内容里有视频/文档（quiz 不算）；无课 = 教学内容为空。
-        检测失败的不硬塞进列表，单独说明，避免误导用户。
+        可刷 = 教学内容里有视频/文档（quiz 不算）；无课 = 教学内容为空；
+        未确认 = 检测失败（网络/页面结构），**仍然留在列表里**，
+        只是标注成「未确认」——以前直接丢掉，用户会以为平台漏扫了课程。
 
         学习通走套件自己的浏览器与个人空间课程卡片，不借用 Edge CDP。
         """
@@ -251,8 +252,8 @@ class TaskRunner:
             self.bus.courses(items, platform)
             self.bus.progress(100, f"识别完成：{len(items)} 门")
             msg = (f"学习通：识别 {len(items)} 门"
-                   f"（可刷 {sum(1 for x in items if x['brushable'])} / "
-                   f"无课 {sum(1 for x in items if not x['brushable'])}）")
+                   f"（可刷 {sum(1 for x in items if x.get('brushable'))} / "
+                   f"无课 {sum(1 for x in items if not x.get('brushable'))}）")
             self.bus.log(msg, "ok")
             return msg
         br = self.ensure_browser()
@@ -284,22 +285,40 @@ class TaskRunner:
                 break
             self.bus.progress(5 + int(90 * i / total), f"检测 {i}/{total}：{name}")
             self.bus.log(f"  [{i}/{total}] 检测「{name}」…")
-            result = plat.probe_course(name)
-            if result is True:
-                items.append({"name": name, "brushable": True, "note": "可刷"})
-                self.bus.log(f"  [{i}/{total}] 「{name}」→ 可刷", "ok")
-            elif result is False:
-                items.append({"name": name, "brushable": False, "note": "无课"})
-                self.bus.log(f"  [{i}/{total}] 「{name}」→ 无课")
-            else:
+            info = None
+            probe_info = getattr(plat, "probe_course_info", None)
+            if callable(probe_info):
+                info = probe_info(name)
+            else:                                   # 兼容只实现了 probe_course 的实现
+                r = plat.probe_course(name)
+                if r is not None:
+                    info = {"brushable": bool(r), "done": 0, "total": 0}
+            if info is None:
                 unknown.append(name)
-                self.bus.log(f"  [{i}/{total}] 「{name}」检测失败，已跳过", "warn")
+                items.append({"name": name, "brushable": True, "note": "未确认",
+                              "unknown": True, "done": 0, "total": 0, "finished": False})
+                self.bus.log(f"  [{i}/{total}] 「{name}」没检测出来，先留在列表里（标「未确认」）",
+                             "warn")
+                continue
+            n_total = int(info.get("total") or 0)
+            n_done = int(info.get("done") or 0)
+            brushable = bool(info.get("brushable"))
+            finished = bool(n_total and n_done >= n_total)
+            note = "刷完" if finished else ("可刷" if brushable else "无课")
+            items.append({"name": name, "brushable": brushable, "note": note,
+                          "done": n_done, "total": n_total, "finished": finished})
+            extra = f"（{n_done}/{n_total}）" if n_total else ""
+            self.bus.log(f"  [{i}/{total}] 「{name}」→ {note}{extra}",
+                         "ok" if brushable else "info")
 
         self.bus.courses(items, platform)
         self.bus.progress(100, f"识别完成：{len(items)} 门")
-        msg = f"识别 {len(items)} 门（可刷 {sum(1 for x in items if x['brushable'])} / 无课 {sum(1 for x in items if not x['brushable'])}）"
+        n_fin = sum(1 for x in items if x.get("finished"))
+        msg = (f"识别 {len(items)} 门（已刷完 {n_fin} / 可刷 "
+               f"{sum(1 for x in items if x.get('brushable') and not x.get('finished'))} / 无课 "
+               f"{sum(1 for x in items if not x.get('brushable'))}）")
         if unknown:
-            msg += f"，{len(unknown)} 门检测失败"
+            msg += f"，{len(unknown)} 门未确认"
         self.bus.log(msg, "ok")
         return msg
 
@@ -348,17 +367,27 @@ class TaskRunner:
         按钮也从「读取观看时长」改名「读取学习进度」。
         """
         if platform == "cx":
-            self.bus.progress(20, "正在打开课程目录…")
-            done, total, err = self.chaoxing().read_progress(course_name)
-            if done is None:
-                self.bus.log(f"学习通进度没读到：{err}", "warn")
+            # v1.8.0：学习通一次就把**全部课程**的进度都读出来。
+            # 以前只能一门一门选着读，账号十几门课时要重复点十几次，
+            # 而且课程列表上的「可刷 / 刷完」也不会跟着更新。
+            self.bus.progress(15, "正在读取学习通全部课程进度…")
+            items = self.chaoxing().list_courses()
+            if not items:
+                self.bus.log("学习通没读到课程列表：可能还没登录，或课程卡还在加载", "warn")
                 return "读取失败"
-            pct = int(round(done / total * 100)) if total else 0
-            self.bus.progress(100, f"完成度 {pct}%")
-            if err:
-                self.bus.log(err, "warn")
-            self.bus.log(f"学习通完成度 {done}/{total}（{pct}%）")
-            return f"完成度 {done}/{total}（{pct}%）"
+            self.bus.courses(items, "cx")
+            for it in items:
+                mark = "刷完" if it.get("finished") else (it.get("progress") or "无任务点")
+                level = "ok" if it.get("finished") else "info"
+                self.bus.log(f"  · {it.get('name')}  {mark}", level)
+            n_fin = sum(1 for x in items if x.get("finished"))
+            d = sum(int(x.get("done") or 0) for x in items)
+            t = sum(int(x.get("total") or 0) for x in items)
+            pct = int(round(d / t * 100)) if t else 0
+            self.bus.progress(100, f"已读 {len(items)} 门，刷完 {n_fin} 门")
+            self.bus.log(f"学习通：共 {len(items)} 门，已刷完 {n_fin} 门；"
+                         f"任务点合计 {d}/{t}（{pct}%）", "ok")
+            return f"{len(items)} 门，刷完 {n_fin} 门（{d}/{t}）"
         br = self.ensure_browser()
         if platform == "ai":
             plat = AiIcve(br, self.bus)

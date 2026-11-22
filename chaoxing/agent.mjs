@@ -50,24 +50,38 @@ if (!executablePath) {
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const writeJson = (file, obj) => fs.writeFileSync(path.join(IO, file), JSON.stringify(obj, null, 2));
 
-const ctx = await chromium.launchPersistentContext(PROFILE, {
+const LAUNCH_ARGS = [
+  '--no-first-run',
+  '--no-default-browser-check',
+  '--disable-blink-features=AutomationControlled',
+  '--window-position=60,40',
+  '--window-size=1500,940',
+  // 学习通会检测失焦/遮挡并暂停视频；关掉 Chrome 的后台节流，让后台标签也照常跑计时
+  '--disable-background-timer-throttling',
+  '--disable-backgrounding-occluded-windows',
+  '--disable-renderer-backgrounding',
+  '--disable-features=CalculateNativeWinOcclusion',
+];
+
+const LAUNCH_OPTS = {
   headless: false,
   executablePath,
   viewport: { width: 1500, height: 940 },
   ignoreDefaultArgs: ['--enable-automation'],
-  args: [
-    '--no-first-run',
-    '--no-default-browser-check',
-    '--disable-blink-features=AutomationControlled',
-    '--window-position=60,40',
-    '--window-size=1500,940',
-    // 学习通会检测失焦/遮挡并暂停视频；关掉 Chrome 的后台节流，让后台标签也照常跑计时
-    '--disable-background-timer-throttling',
-    '--disable-backgrounding-occluded-windows',
-    '--disable-renderer-backgrounding',
-    '--disable-features=CalculateNativeWinOcclusion',
-  ],
-});
+  args: LAUNCH_ARGS,
+};
+
+// v1.8.0：Playwright 默认给 Chromium 加 --no-sandbox，Chrome 就会在窗口顶部
+// 挂一条红字「您使用的是不受支持的命令行标记：--no-sandbox」——用户截图里那个
+// 「启动浏览器会报错」就是它。打开 chromiumSandbox 后 Playwright 不再加这个参数，
+// 警告条消失。个别以管理员身份运行的机器带沙箱起不来，那时才回退并如实提示。
+let ctx;
+try {
+  ctx = await chromium.launchPersistentContext(PROFILE, { ...LAUNCH_OPTS, chromiumSandbox: true });
+} catch (e) {
+  console.error('沙箱模式启动失败，改用免沙箱模式（窗口顶部可能出现命令行标记提示）：' + (e && e.message ? e.message : e));
+  ctx = await chromium.launchPersistentContext(PROFILE, { ...LAUNCH_OPTS, chromiumSandbox: false });
+}
 
 // 登录会话单独存一份 cookie 快照。
 // Chromium 的 profile 只在浏览器**正常退出**时才把 cookie 写进 SQLite；

@@ -459,9 +459,12 @@ class ChaoxingSuite:
         for c in courses:
             total, done = c.get("total"), c.get("done")
             brushable = bool(total and total > 0)
-            note = "可刷" if brushable else "无课"
+            finished = bool(total and done is not None and done >= total)
+            note = "刷完" if finished else ("可刷" if brushable else "无课")
             name = (c.get("name") or "").strip() or ("课程" + str(c.get("cid")))
             items.append({"name": name, "brushable": brushable, "note": note,
+                          "done": int(done or 0), "total": int(total or 0),
+                          "finished": finished,
                           "progress": f"{done}/{total}" if total else ""})
         return items
 

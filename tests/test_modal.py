@@ -29,6 +29,22 @@ from core.platforms.ai_icve import AiIcve
 COURSE = os.environ.get("SB_COURSE", "大学生心理健康")
 
 
+def clean_tabs(br, home):
+    """把复用的真机浏览器收敛到一个页面并回到首页（详见 test_brush_skip 里的说明）。
+
+    脏标签页停在 myCourses 之类 SPA 路由上时，首页数字区块不渲染，
+    read_watch() 返回 (None, None)，会让人误以为掉登录。
+    """
+    try:
+        for p in list(br.ctx.pages or []):
+            if p is not br.page:
+                p.close()
+        br.goto(home)
+        br.wait(2500)
+    except Exception as e:
+        print(f"    (清理标签页失败，忽略：{e})")
+
+
 def main():
     bus = EventBus()
     br = Browser(bus)
@@ -36,6 +52,7 @@ def main():
     rc = 0
     try:
         br.wait(2500)
+        clean_tabs(br, config.AI_ICVE_HOME)
         plat = AiIcve(br, bus)
         h, _ = plat.read_watch()
         print(f"[1] 登录态：{h} 时")

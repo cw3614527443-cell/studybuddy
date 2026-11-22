@@ -66,6 +66,11 @@ class App:
         self._shutdown_deadline = 0.0
         self._destroyed = False
         self._pump_started = False
+        # 扫描结果按平台缓存：切换平台再切回来不用重扫（v1.8.0）。
+        # 同时这也杜绝了「AI 优课扫出来的课串到 zjy2 列表里」——
+        # 每个平台只认自己 key 下的结果。
+        self._course_cache = {}
+        self._courses_platform = None
 
         W.init_scale(root)                      # 必须在建控件前定下缩放比
         root.title(f"{APP_NAME} v{APP_VERSION}")
@@ -402,14 +407,29 @@ class App:
         pass
 
     def _on_platform_change(self, key=None):
-        """切换平台：刷新说明、隐藏不适用参数、清空别的平台的课程列表。"""
+        """切换平台：刷新说明、隐藏不适用参数、加载该平台的课程缓存。
+
+        v1.8.0：
+        · 任务运行中（扫描 / 刷课 / 读进度）一律不许换平台 —— 换平台会让
+          后台正在跑的扫描结果落到错的列表里，用户看到的就是「AI 优课和 zjy2
+          课程混在一起」。点了直接提示，并把高亮拨回原平台。
+        · 每个平台的扫描结果各自缓存，切回来立刻能看到，不用重扫。
+        """
+        current = self.platform_var.get()
+        if key and key != current and self.runner.is_running():
+            self.seg.set(current)                 # 高亮拨回去，别显示成已切换
+            self.note_label.config(text="请先停止任务再切换平台", fg=W.RED)
+            messagebox.showinfo("正在运行任务", "请先停止任务再切换平台。\n\n"
+                                              "扫描/刷课过程中切换平台，会让结果落到"
+                                              "另一个平台的课程列表里。")
+            return
         if key:
             self.platform_var.set(key)
             if self.seg.get() != key:          # 从代码切换时同步平台卡
                 self.seg.set(key)
         plat = self.platform_var.get()
         info = self.PLATFORM_INFO.get(plat, {})
-        self.note_label.config(text="注意：" + info.get("desc", ""))
+        self.note_label.config(text="注意：" + info.get("desc", ""), fg=W.TEXT_SUB)
 
         # 只有 AI 优课有单独的「刷观看时长」入口；其他平台藏掉免得误填
         if plat == "ai":
@@ -417,12 +437,18 @@ class App:
         else:
             self._params.pack_forget()
 
-        # 课程列表按平台区分：换平台必须重新扫描，不能拿旧的课程名去跑
-        if getattr(self, "_courses_platform", None) != plat:
+        # 课程列表按平台分家：有缓存就直接铺回来，没有就空态
+        picker = getattr(self, "course_picker", None)
+        cached = self._course_cache.get(plat)
+        if cached:
+            self._courses = list(cached)
+            self._courses_platform = plat
+            if picker is not None:
+                self._apply_course_items(self._courses, keep_selection=False)
+        else:
             self._courses = []
             self._courses_platform = None
             self.course_var.set("")
-            picker = getattr(self, "course_picker", None)
             if picker is not None:
                 picker.set_items([])
         self._refresh_course_hint()
@@ -443,18 +469,27 @@ class App:
             self.course_hint.config(text="还没扫描", fg=W.TEXT_MUT)
             return
         n = len(self._courses)
-        brush = sum(1 for x in self._courses if x.get("brushable"))
-        self.course_hint.config(text=f"识别 {n} 门 · 可刷 {brush}", fg=W.GREEN)
+        fin = sum(1 for x in self._courses if x.get("finished"))
+        brush = sum(1 for x in self._courses
+                    if x.get("brushable") and not x.get("finished"))
+        txt = f"识别 {n} 门"
+        if fin:
+            txt += f" · 刷完 {fin}"
+        txt += f" · 可刷 {brush}"
+        if any(x.get("unknown") for x in self._courses):
+            txt += " · 未确认 " + str(sum(1 for x in self._courses if x.get("unknown")))
+        self.course_hint.config(
+            text=txt, fg=W.GREEN if brush else (W.ACCENT if fin else W.TEXT_MUT))
 
-    def _on_courses(self, data):
-        """后台扫描完课程列表，回填下拉框。"""
-        items = data.get("items") or []
-        self._courses = items
-        self._courses_platform = data.get("platform")
-        # 可刷课程 ≥2 门时，列表顶部加一条「全部可刷课程」：
-        # 替别人刷课常常一账号十几门，一门门点太费事。
-        n_brush = sum(1 for x in items if x.get("brushable"))
-        picker_items = list(items)
+    def _apply_course_items(self, items, keep_selection=False):
+        """把扫描结果铺进下拉框：加「全部可刷课程」总入口，并挑一个默认课程。
+
+        可刷（且没刷完）的课程 ≥2 门时，列表顶部加一条「★ 全部可刷课程」：
+        替别人刷课常常一账号十几门，一门门点太费事。
+        """
+        n_brush = sum(1 for x in items if x.get("brushable") and not x.get("finished"))
+        # 防空：缓存里若混进了上一次拼的「★ 全部可刷课程」伪条目，先剔掉再重拼
+        picker_items = [x for x in items if x.get("name") != "__all__"]
         if n_brush >= 2:
             picker_items.insert(0, {
                 "name": "__all__",
@@ -462,22 +497,44 @@ class App:
                 "brushable": True, "tag": "批量", "note": "全部",
             })
         self.course_picker.set_items(picker_items)
-        # 若当前选中的课不在新列表里，自动选中第一门具体课程
-        # （不默认选「全部可刷」，误点③一下刷十几门课代价太大）
         cur = self.course_var.get()
         names = [x.get("name") for x in picker_items]
-        if picker_items and cur not in names:
-            first = next((x for x in picker_items
-                          if x.get("brushable") and x.get("name") != "__all__"),
-                         picker_items[-1])
-            self.course_var.set(first["name"])
+        if not picker_items:
+            self.course_var.set("")
             self.course_picker._render()
+            return
+        if keep_selection and cur in names:
+            return
+        # 不默认选「全部可刷」，误点③一下刷十几门课代价太大
+        if cur not in names:
+            first = next((x for x in picker_items
+                          if x.get("brushable") and x.get("name") != "__all__"), None)
+            self.course_var.set((first or picker_items[-1])["name"])
+            self.course_picker._render()
+
+    def _on_courses(self, data):
+        """后台扫描完课程列表，先按平台入缓存，再决定要不要铺到界面。"""
+        items = data.get("items") or []
+        plat = data.get("platform")
+        if plat:
+            self._course_cache[plat] = items
+        cur = self.platform_var.get()
+        if plat and plat != cur:
+            # 扫描期间平台被切走（理论上已被拦住，这里兜底）：
+            # 结果只能进缓存，绝不能铺到别的平台列表上
+            self._append_log({"time": "", "msg": f"「{plat}」的扫描结果已缓存，"
+                                                  f"切回该平台即可看到", "level": "muted"})
+            return
+        self._courses = items
+        self._courses_platform = plat
+        self._apply_course_items(items)
         self._refresh_course_hint()
 
     def on_scan_courses(self):
         if self.runner.is_running():
             return
         platform = self.platform_var.get()
+        self.course_picker.close()        # 扫描一开始就收起弹层，避免它挡住日志又关不掉
         self.course_hint.config(text="扫描中…", fg=W.ACCENT)
         self._run(lambda: self.runner.action_list_courses(platform), nav=None)
         self._set_status("扫描课程中…", "run")
@@ -539,15 +596,20 @@ class App:
             "    · 扫码 / 手动：在弹出的窗口里自己扫码或输账号密码。\n"
             "    登录一次后，只要不点「关闭浏览器」，下次打开仍在登录状态。\n"
             "    学习通使用独立的 Chrome/Edge 窗口（平台要求有头、不能失焦）。\n\n"
-            "【扫描课程】选好平台后，点任务参数里的「扫描课程」\n"
+            "【扫描课程】选好平台后，点课程参数里的「扫描课程」\n"
             "    自动读取你在该平台的全部课程，列成下拉框；每项旁边标着\n"
-            "    「可刷」（教学内容里有视频/文档）或「无课」（教学内容是空的）。\n"
-            "    点课程名即可选中，不用再手打（打错字会找不到课程）。\n"
-            "    换平台后列表会清空，需要重新扫描一次。\n\n"
+            "    「刷完」（全做完了，深蓝底）/「可刷」（还有视频文档没做）/「无课」\n"
+            "    （教学内容是空的）/「未确认」（这次没检测出来，仍可选中去试）。\n"
+            "    AI 优课会把「校内私有课」和「校外公开课」两个标签、以及每一页都读完。\n"
+            "    扫描结果按平台分别缓存：切到别的平台再切回来，列表还在，不用重扫。\n"
+            "    扫描进行中不能切换平台（会提示「请先停止任务再切换平台」），\n"
+            "    否则结果会落到另一个平台的课程列表里。\n\n"
             "② 读取学习进度\n"
             "    AI 优课先读首页的「观看时长 / 学习次数」；如果这门课不计学时\n"
             "    （页面上没有这项数字），会自动改为统计目录里的刷课完成度。\n"
-            "    zjy2 / 学习通没有学时统计，直接读任务点完成度（已完成 / 总数）。\n\n"
+            "    zjy2 直接读任务点完成度（已完成 / 总数）。\n"
+            "    学习通一次就把**全部课程**的进度读出来并逐门列进日志，\n"
+            "    列表里刷完的课会同步变成「刷完」，不用一门一门点。\n\n"
             "③ 刷课（一键过完）\n"
             "    把目录里未完成的资源逐个打开：视频直接把进度条拖到末尾，\n"
             "    文档翻到最后一页。不耗真实观看时间，速度快。\n"

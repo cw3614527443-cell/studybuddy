@@ -54,16 +54,28 @@ _STATE_JS = r"""
     vids.sort((a, b) => (b.clientWidth * b.clientHeight) - (a.clientWidth * a.clientHeight));
     const v = vids[0] || null;
 
-    // 文档页码：只认 "12 / 34" 这种独立的短文本，避免把日期、学年当页码
+    // 文档页码：旧版是 "12 / 34" 独立短文本；新版 zjy2 写成 "1 / 59 下一页"
+    // （页码容器里还塞着翻页按钮），所以必须按**前缀**匹配，不能再要求整行相等。
+    // 排除 el-input 的字数计数器（"0/50"），那是评论框，不是页码。
     let pages = null;
     for (const e of document.querySelectorAll('span,div,i,b,em,li,p')) {
-        if (e.children.length !== 0 || !vis(e)) continue;
-        const s = (e.textContent || '').trim();
-        const m = s.match(/^(\d{1,4})\s*[\/]\s*(\d{1,4})$/);
+        if (!vis(e)) continue;
+        const cls = String(e.className || '');
+        if (cls.includes('el-input') || cls.includes('el-textarea')) continue;
+        const s = (e.innerText || '').trim();
+        if (!s || s.length > 24) continue;
+        const m = s.match(/^(\d{1,4})\s*[\/]\s*(\d{1,4})(?!\d)/);
         if (!m) continue;
         const cur = +m[1], tot = +m[2];
         if (tot >= 1 && tot <= 3000 && cur >= 1 && cur <= tot) { pages = {cur, tot}; break; }
     }
+
+    // v1.8.0：新版课件阅读器（PPT/PDF 走 .office + el-carousel 幻灯片图片）。
+    // 它既没有 iframe 也没有 canvas，页码又是 "1 / 59 下一页" 的复合文本，
+    // 之前两样都识别不到 → 明明课件已经显示出来了却报「没出现播放器或文档」。
+    const readerEl = document.querySelector('.office');
+    const slides = readerEl ? [...readerEl.querySelectorAll('img')].filter(vis) : [];
+    const slidesLoaded = slides.filter(i => !/loading\.gif/i.test(i.src || '')).length;
 
     // 文档预览容器：iframe（可能是跨域 PDF 预览）或 canvas（PDF.js / 课件渲染）
     const frs = [...document.querySelectorAll('iframe')].filter(vis)
@@ -101,6 +113,9 @@ _STATE_JS = r"""
             src: ((v.currentSrc || v.src || '').split('?')[0]).slice(-60),
         } : null,
         pages: pages,
+        reader: !!readerEl,
+        slides: slides.length,
+        slidesLoaded: slidesLoaded,
         frame: fr ? (fr.src || fr.getAttribute('src') || '').slice(0, 120) : '',
         frameReady: frameReady,
         canvas: canvas,
@@ -331,6 +346,9 @@ class Zjy2:
 
         空课（教学内容整个是空白）永远等不到 .listItem，所以这里只等几秒：
         有章节就展开数叶子，没有章节且没加载遮罩就判无课。
+
+        返回 {brushable, done, total}；认不出来返回 None。
+        done/total 用来在课程列表里标「刷完」，不必再单独跑一次复核。
         """
         deadline = time.time() + wait_ms / 1000.0
         while time.time() < deadline:
@@ -344,7 +362,7 @@ class Zjy2:
                 # 没有章节、也没有加载遮罩：确认是空课
                 self.br.wait(800)
                 if self.p.locator(".listItem[id]").count() == 0:
-                    return False
+                    return {"brushable": False, "done": 0, "total": 0}
             except Exception:
                 pass
             self.br.wait(700)
@@ -352,16 +370,27 @@ class Zjy2:
             self.expand_all(rounds=2)
             items = self.list_resources()
             brushable = [x for x in items if x.get("kind") != "quiz"]
-            return len(brushable) > 0
+            done = sum(1 for x in brushable if (x.get("pct") or 0) >= 100)
+            return {"brushable": len(brushable) > 0, "done": done, "total": len(brushable)}
         except Exception as e:
             self._log(f"检测课程资源时出错：{e}", "warn")
             return None
 
-    def probe_course(self, course_name, timeout=16):
-        """进入课程、展开目录，判断有无可刷资源（quiz 不算）。"""
+    def probe_course_info(self, course_name, timeout=16):
+        """进入课程并返回 {brushable, done, total}；进不去/读不到返回 None。"""
         if not self.enter_course(course_name, timeout=timeout):
             return None
-        return self.probe_resources_fast()
+        res = self.probe_resources_fast()
+        if isinstance(res, bool):        # 兼容旧调用/测试桩
+            res = {"brushable": res, "done": 0, "total": 0}
+        return res
+
+    def probe_course(self, course_name, timeout=16):
+        """进入课程、展开目录，判断有无可刷资源（quiz 不算）。返回 True/False/None。"""
+        info = self.probe_course_info(course_name, timeout=timeout)
+        if info is None:
+            return None
+        return bool(info.get("brushable"))
 
     def _leaf_count(self):
         try:
@@ -510,6 +539,9 @@ class Zjy2:
             return "doc", True
         if (st.get("canvas") or 0) > 0:
             return "doc", True
+        # 新版阅读器：幻灯片图片已经换掉 loading.gif 就算就绪
+        if st.get("reader") and (st.get("slidesLoaded") or 0) > 0:
+            return "doc", True
         return "", False
 
     @staticmethod
@@ -525,7 +557,10 @@ class Zjy2:
             return "播放器还没拿到时长"
         if st.get("frame") and st.get("frameReady") == "loading":
             return "预览框还没加载好"
-        if not (st.get("video") or st.get("pages") or st.get("frame") or st.get("canvas")):
+        if st.get("reader") and not (st.get("slidesLoaded") or 0) and not st.get("pages"):
+            return "课件阅读器还在加载幻灯片"
+        if not (st.get("video") or st.get("pages") or st.get("frame")
+                or st.get("canvas") or st.get("reader")):
             return "没出现播放器或文档"
         return "内容还没稳定"
 
@@ -604,6 +639,9 @@ class Zjy2:
         self._sync_page()
         rid, name = node["id"], node["name"]
         for attempt in range(retries):
+            # 滑块验证挡在前面时，点什么都没反应，先让用户拖完
+            if self.captcha_hint() and not self.wait_captcha():
+                return False
             before = self._content_state()
             if not self._click_node(rid, mode=attempt):
                 self._log("  点击没有命中，重试…", "warn")
@@ -666,37 +704,90 @@ class Zjy2:
             self.br.wait(1000)
         return False
 
+    # ---------- 安全验证（滑块） ----------
+    # 实测：短时间内连续翻几十页会触发平台的滑块验证（页面底部出现
+    # 「拖动下方拼图完成验证」）。这不是「加载慢」，等下去永远不会好，
+    # 必须让真人在浏览器窗口里拖一次。程序只负责发现并等待，不去绕过它。
+    _CAPTCHA_WORDS = ("拖动下方拼图", "请完成验证", "完成安全验证", "滑动验证",
+                      "拖动滑块", "安全验证失败")
+
+    def captcha_hint(self):
+        """当前页面是否停在人机验证上；是则返回命中的提示词。"""
+        try:
+            t = self.br.text()[-800:]
+        except Exception:
+            return ""
+        for w in self._CAPTCHA_WORDS:
+            if w in t:
+                return w
+        return ""
+
+    def wait_captcha(self, timeout=180):
+        """发现滑块就等用户拖完。返回 True=已通过/本来就没有，False=超时或已停止。"""
+        hint = self.captcha_hint()
+        if not hint:
+            return True
+        self._log(f"平台弹出安全验证（「{hint}」）：请在浏览器窗口里拖动滑块完成验证，"
+                  f"程序最多等 {timeout} 秒，拖完会自动继续…", "warn")
+        try:
+            self.br.shot("captcha")
+        except Exception:
+            pass
+        t0 = time.time()
+        while time.time() - t0 < timeout:
+            if self._stopped():
+                return False
+            self.br.wait(1500)
+            if not self.captcha_hint():
+                self._log("验证已通过，继续刷课", "ok")
+                self.br.wait(1200)
+                return True
+        self._log("等待验证超时：滑块超过 3 分钟没拖完，本次先停下。"
+                  "拖完验证后再点③即可接着刷", "error")
+        return False
+
     # ---------- 刷课 ----------
     def _dismiss_doc_resume(self):
-        """关文档类续播弹窗「上次观看到第X页，是否继续观看？」→ 点「确定」。
+        """关文档类续播弹窗「上次观看到第X页，是否继续观看？」。
 
-        只看按钮所在浮层的文案，普通公告里的「确定」不会被误点。
+        v1.8.0 实测：一定要点**「取消」**（= 不续播，从第 1 页开始）。
+        点「确定」会跳到上次那一页，然后新版阅读器的页码控件就再也读不到了
+        （`_doc_pages()` 一直返回 None），后续翻页逻辑直接失效 —— 表现就是
+        「课件明明在翻，进度一点没涨」。
+
+        只看按钮所在浮层的文案，普通公告里的「取消」不会被误点。
         """
-        try:
-            return bool(self.p.evaluate(
-                """() => {
-                    const vis = e => {
-                        const r = e.getBoundingClientRect();
-                        return r.width > 1 && r.height > 1 &&
-                               getComputedStyle(e).visibility !== 'hidden';
-                    };
-                    for (const b of document.querySelectorAll(
-                            'button,[role=button],a,[class*=btn],[class*=button]')) {
-                        if (!vis(b) || (b.textContent || '').trim() !== '确定') continue;
-                        let p = b, i = 0, hit = false;
-                        while (p && i++ < 10) {
-                            if (/上次观看到|上次阅读到|上次浏览到/.test(p.innerText || '')) {
-                                hit = true; break;
+        for label in ("取消", "确定"):
+            try:
+                hit = bool(self.p.evaluate(
+                    """(label) => {
+                        const vis = e => {
+                            const r = e.getBoundingClientRect();
+                            return r.width > 1 && r.height > 1 &&
+                                   getComputedStyle(e).visibility !== 'hidden';
+                        };
+                        for (const b of document.querySelectorAll(
+                                'button,[role=button],a,[class*=btn],[class*=button]')) {
+                            if (!vis(b) || (b.textContent || '').trim() !== label) continue;
+                            let p = b, i = 0, ok = false;
+                            while (p && i++ < 10) {
+                                if (/上次观看到|上次阅读到|上次浏览到/.test(p.innerText || '')) {
+                                    ok = true; break;
+                                }
+                                p = p.parentElement;
                             }
-                            p = p.parentElement;
+                            if (ok) { b.click(); return true; }
                         }
-                        if (hit) { b.click(); return true; }
-                    }
-                    return false;
-                }"""
-            ))
-        except Exception:
-            return False
+                        return false;
+                    }""",
+                    label,
+                ))
+            except Exception:
+                hit = False
+            if hit:
+                self.br.wait(900)
+                return True
+        return False
 
     def _dismiss_resume(self):
         """兜底关续播弹窗（正常由页面内看门狗处理，这里防它没跑到）。"""
@@ -715,8 +806,17 @@ class Zjy2:
         返回 {kind, ok, note}：**没真的刷到才算失败**，由调用方重试。
         """
         self._dismiss_resume()
+        # 续播弹窗点「确定」会跳到上次那一页，页码控件会短暂重绘读不到；
+        # 这时若直接把 pages 当空的，就会走成「单页文档」分支、一页都不翻（实测过的坑）。
+        self.br.wait(900)
         st = self._content_state()
         kind, ready = self._ready_kind(st)
+        for _ in range(4):
+            if ready:
+                break
+            self.br.wait(700)
+            st = self._content_state()
+            kind, ready = self._ready_kind(st)
         if not ready:
             return {"kind": kind, "ok": False, "note": self._describe(st)}
 
@@ -727,9 +827,41 @@ class Zjy2:
 
         return self._read_doc(st)
 
+    def _wait_slide_loaded(self, timeout_ms=2200):
+        """等当前这一页幻灯片的图真的换上来（新版阅读器先显示 loading.gif）。
+
+        不确认就点「下一页」，平台会认为这页没看，进度少记几页 ——
+        实测一份 48 页的 PPT 只能记到 95%。
+        """
+        t0 = time.time()
+        while (time.time() - t0) * 1000 < timeout_ms:
+            try:
+                ok = self.p.evaluate(
+                    """() => {
+                        const vis = i => i && i.offsetParent !== null &&
+                                         i.getBoundingClientRect().width > 200;
+                        const imgs = [...document.querySelectorAll('.office img')].filter(vis);
+                        if (!imgs.length) return true;
+                        return imgs.every(i => !/loading\\.gif/i.test(i.src || ''));
+                    }"""
+                )
+            except Exception:
+                return
+            if ok:
+                return
+            self.br.wait(250)
+
     def _read_doc(self, st):
         """文档类：翻到末页（单页则滚动停留），最后刷新让平台同步进度。"""
         pages = st.get("pages") or {}
+        if not pages.get("tot"):
+            # 页码可能还在重绘：补读几次，别把「48 页的 PPT」当单页跳过
+            for _ in range(5):
+                self.br.wait(600)
+                again = self._doc_pages()
+                if again:
+                    pages = again
+                    break
         cur, tot = pages.get("cur"), pages.get("tot")
 
         moved = 0
@@ -737,14 +869,21 @@ class Zjy2:
             for _ in range(tot + 10):
                 if self._stopped():
                     return {"kind": "doc", "ok": False, "note": "已停止"}
+                if self.captcha_hint() and not self.wait_captcha():
+                    return {"kind": "doc", "ok": False, "note": "卡在安全验证（滑块）"}
                 if not self._click_next_page():
                     break
                 moved += 1
-                self.br.wait(650)
+                # v1.8.0 实测：翻页太快平台**不计进度**。
+                # 同一份 48 页 PPT：650ms/页翻完只记到 10%，1400ms/页能记到 22%（11 页）。
+                # 平台按「每页停留≥1 秒」结算，抢跑等于白翻，还会谎报成功。
+                self.br.wait(1400)
+                self._wait_slide_loaded()      # 等这一页的图真的换上来再继续
                 now = self._doc_pages()
                 if now and now["cur"] >= now["tot"]:
                     break
-            self.br.wait(800)
+            # 停在末页多待一会儿：平台要这段停留时间才把最后几页记进去
+            self.br.wait(2200)
             # v1.4.3：弹窗盖住预览时「下一页」根本点不动，以前照样返回 ok，
             # 进度一直 0% 却继续往下刷。这里必须判定为没刷到，让调用方重试。
             now = self._doc_pages()
@@ -761,13 +900,18 @@ class Zjy2:
         return {"kind": "doc", "ok": True, "note": ""}
 
     def _doc_pages(self):
+        """读文档页码。兼容旧版 "12 / 34" 与新版 "1 / 59 下一页"。"""
         try:
             return self.p.evaluate(
                 """() => {
                     const vis = e => e && e.offsetParent !== null;
                     for (const e of document.querySelectorAll('span,div,i,b,em,li,p')) {
-                        if (e.children.length || !vis(e)) continue;
-                        const m = (e.textContent || '').trim().match(/^(\\d{1,4})\\s*[\\/]\\s*(\\d{1,4})$/);
+                        if (!vis(e)) continue;
+                        const cls = String(e.className || '');
+                        if (cls.includes('el-input') || cls.includes('el-textarea')) continue;
+                        const s = (e.innerText || '').trim();
+                        if (!s || s.length > 24) continue;
+                        const m = s.match(/^(\\d{1,4})\\s*[\\/]\\s*(\\d{1,4})(?!\\d)/);
                         if (!m) continue;
                         const cur = +m[1], tot = +m[2];
                         if (tot >= 1 && tot <= 3000 && cur >= 1 && cur <= tot) return {cur, tot};
@@ -783,11 +927,13 @@ class Zjy2:
             return bool(self.p.evaluate(
                 """() => {
                     const vis = e => e && e.offsetParent !== null && e.getBoundingClientRect().width > 0;
-                    const cands = [...document.querySelectorAll('*')].filter(e =>
+                    // 旧版是纯文本「下一页」；新版是 <button><span> 下一页 </span></button>
+                    const cands = [...document.querySelectorAll('button,a,span,div,li,i')].filter(e =>
                         e.children.length === 0 && vis(e) &&
-                        /^(下一页|下一頁|Next)$/.test((e.textContent || '').trim()));
+                        /^(下一页|下一頁|Next)$/.test((e.textContent || '').trim()) &&
+                        !e.disabled && !/is-disabled/.test(String(e.className || '')));
                     if (!cands.length) return false;
-                    cands[0].click();
+                    (cands[0].closest('button') || cands[0]).click();
                     return true;
                 }"""
             ))
@@ -808,20 +954,74 @@ class Zjy2:
         except Exception:
             pass
 
+    def _expand_light(self):
+        """刷新后把目录展开一层，让 `.ziProgress` 能被读到。
+
+        v1.8.0：新版页面的目录是**懒加载**的 —— 刷新之后只剩章节行，
+        资源和它的进度条要再点一次章节和「课件」子项才会请求回来。
+        不展开就读不到进度，进度回读永远是 None，全部项都被拖到结尾统一复核。
+        """
+        prev = -1
+        for _ in range(3):
+            try:
+                self.p.evaluate(
+                    """() => {
+                        for (const el of document.querySelectorAll('.listItem[id]')) {
+                            const it = el.querySelector(':scope > .items');
+                            if (it && !el.querySelector('.items.iChild')) it.click();
+                        }
+                    }"""
+                )
+            except Exception:
+                pass
+            self.br.wait(700)
+            try:
+                self.p.evaluate(
+                    """() => {
+                        for (const el of document.querySelectorAll('.items.iChild')) {
+                            const wrap = el.parentElement;
+                            if (wrap && !wrap.querySelector('.fwenjianjia')) el.click();
+                        }
+                    }"""
+                )
+            except Exception:
+                pass
+            self.br.wait(900)
+            try:
+                n = self.p.evaluate(
+                    "() => document.querySelectorAll('.fwenjianjia[id]').length")
+            except Exception:
+                return
+            if n and n == prev:      # 数量不再增长 = 都点开了
+                break
+            prev = n
+
     def _flush_progress(self):
-        """刷新一次，让平台把刚看的进度上报/回显。刷新失败不影响结果。"""
+        """刷新一次，让平台把刚看的进度上报/回显。刷新失败不影响结果。
+
+        v1.8.0 两个修正：
+        · **先回目录页再刷新**。刷完文档后 URL 还停在
+          `spoccourseIndex/courseware?...` 阅读器路由上，直接 reload 只会把阅读器
+          再加载一遍 —— 页面上根本没有 `.listItem`，进度回读永远是 None。
+        · 刷新后把目录展开一层：新版页面目录是懒加载的，不点开进度条节点不存在。
+        """
+        try:
+            self.go_index()          # 从阅读器路由回到目录
+        except Exception:
+            pass
         try:
             self.br.reload()
         except Exception:
             return
-        # 等它重新渲染出来，但不强求（刷新只是为了同步进度）
         t0 = time.time()
-        while time.time() - t0 < 12:
-            st = self._content_state()
-            kind, ready = self._ready_kind(st)
-            if ready:
-                break
-            self.br.wait(700)
+        while time.time() - t0 < 15:
+            try:
+                if self.p.locator(".listItem[id]").count() > 0:
+                    break
+            except Exception:
+                pass
+            self.br.wait(600)
+        self._expand_light()
 
     def _drag_to_end(self):
         """分两步拖进度条：先到一半，再到结尾前 0.5 秒，等它自然播完。
@@ -966,6 +1166,10 @@ class Zjy2:
         aborted = False          # 是否因系统性问题提前中止
         for i, r in enumerate(todo, 1):
             if self._stopped():
+                break
+            if self.captcha_hint() and not self.wait_captcha():
+                aborted = True
+                self._log("因安全验证未通过提前中止，剩下的项目留着下次刷", "error")
                 break
             if progress_cb:
                 progress_cb(i, len(todo), r["name"])

@@ -31,6 +31,23 @@ HEADLESS = "--headless" in sys.argv
 COURSE = os.environ.get("SB_COURSE", "大学生心理健康")
 
 
+def clean_tabs(br, home):
+    """把复用的真机浏览器收敛到一个页面并回到首页。
+
+    为什么需要：connect 会挑一个已有标签页，若它还停在 myCourses / 阅读器这类
+    SPA 路由上，首页的「观看时长 / 学习次数」数字区块根本不渲染 →
+    read_watch() 读到 (None, None)，被误判成「掉登录」。这跟代码无关，是脏环境。
+    """
+    try:
+        for p in list(br.ctx.pages or []):
+            if p is not br.page:
+                p.close()
+        br.goto(home)
+        br.wait(2500)
+    except Exception as e:
+        print(f"    (清理标签页失败，忽略：{e})")
+
+
 def main():
     bus = EventBus()
     br = Browser(bus)
@@ -39,6 +56,7 @@ def main():
     try:
         plat = AiIcve(br, bus)
         br.wait(3000)
+        clean_tabs(br, config.AI_ICVE_HOME)
         h, c = plat.read_watch()
         print(f"[1] 登录态检查：观看时长={h} 时 / 学习次数={c}")
         if h is None:

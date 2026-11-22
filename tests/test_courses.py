@@ -192,8 +192,51 @@ def test_action():
     check("掉登录 summary=未登录", summary == "未登录", summary)
 
 
+def test_ai_two_tabs():
+    """v1.8.0：AI 优课的课分在两个标签下，必须都读。
+
+    用户报的 bug：真正的课（大学生心理健康）扫不到 —— 它在「校外公开课」标签，
+    而旧代码只读「校内私有课」。
+    """
+    print("== AI 优课两个标签都要读 ==")
+
+    class TabPage:
+        def __init__(self, private, public):
+            self.tab = "校内私有课"
+            self.private = private
+            self.public = public
+
+        def evaluate(self, js, arg=None):
+            if "tab-item" in js:
+                if arg is not None:
+                    self.tab = arg
+                return True
+            if "course-name" in js:
+                return list(self.private if self.tab == "校内私有课" else self.public)
+            if "page-item" in js:
+                return 1 if arg is None else False
+            return []
+
+    page = TabPage(["大学英语（1）", "Linux操作系统"], ["大学生心理健康", "虚拟化技术与应用"])
+    br = FakeBr()
+    br.page = page
+    plat = AiIcve(br)
+    got = plat.list_course_names()
+    check("校内私有课 + 校外公开课合并",
+          got == ["大学英语（1）", "Linux操作系统", "大学生心理健康", "虚拟化技术与应用"],
+          str(got))
+
+    # 两个标签有重名课时去重，不要把同一门算两次
+    page2 = TabPage(["大学生心理健康", "A"], ["大学生心理健康", "B"])
+    br2 = FakeBr()
+    br2.page = page2
+    got2 = AiIcve(br2).list_course_names()
+    check("跨标签去重保序", got2 == ["大学生心理健康", "A", "B"], str(got2))
+
+
 def main():
     test_ai_names()
+    test_ai_two_tabs()
     test_zjy2_names()
     test_probe_logic()
     test_action()

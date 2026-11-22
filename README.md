@@ -16,8 +16,8 @@
 
 | 包 | 文件 | 说明 |
 |---|---|---|
-| 安装版（推荐） | [`StudyBuddy-Setup-1.7.2.exe`](https://github.com/cw3614527443-cell/studybuddy/releases/latest/download/StudyBuddy-Setup-1.7.2.exe) | 约 41 MB，向导安装，自动建快捷方式与卸载项 |
-| 免安装版 | [`StudyBuddy-1.7.2-Windows.zip`](https://github.com/cw3614527443-cell/studybuddy/releases/latest/download/StudyBuddy-1.7.2-Windows.zip) | 约 59 MB，解压即用，数据随目录 |
+| 安装版（推荐） | [`StudyBuddy-Setup-1.8.0.exe`](https://github.com/cw3614527443-cell/studybuddy/releases/latest/download/StudyBuddy-Setup-1.8.0.exe) | 约 41 MB，向导安装，自动建快捷方式与卸载项 |
+| 免安装版 | [`StudyBuddy-1.8.0-Windows.zip`](https://github.com/cw3614527443-cell/studybuddy/releases/latest/download/StudyBuddy-1.8.0-Windows.zip) | 约 59 MB，解压即用，数据随目录 |
 
 ## ⚠️ 免责声明
 
@@ -89,7 +89,7 @@
 
 ### 方式一：安装包（推荐）
 
-下载 `StudyBuddy-Setup-x.y.z.exe`（当前 `StudyBuddy-Setup-1.7.2.exe`），双击按向导安装。特点：
+下载 `StudyBuddy-Setup-x.y.z.exe`（当前 `StudyBuddy-Setup-1.8.0.exe`），双击按向导安装。特点：
 
 - **不需要管理员权限**，按用户安装到 `%LOCALAPPDATA%\Programs\StudyBuddy`
 - 自动创建开始菜单快捷方式，桌面快捷方式可选
@@ -100,7 +100,7 @@
 
 ### 方式二：免安装包（绿色版）
 
-下载 `StudyBuddy-x.y.z-Windows.zip`（当前 `StudyBuddy-1.7.2-Windows.zip`），解压后双击 `StudyBuddy.exe`。
+下载 `StudyBuddy-x.y.z-Windows.zip`（当前 `StudyBuddy-1.8.0-Windows.zip`），解压后双击 `StudyBuddy.exe`。
 
 **整个文件夹**（含 `_internal/`）必须一起复制，exe 单独拷走会闪退。数据（登录态、截图、日志）就放在 exe 旁边，删目录即彻底清除。
 

@@ -617,17 +617,35 @@ def divider(master, pady=10, padx=0):
 
 
 class CoursePicker(RoundedCanvas):
-    """课程下拉选择器：显示当前课程名，点开弹出带「可刷/无课」标记的列表。
+    """课程下拉选择器：显示当前课程名，点开弹出带「刷完/可刷/无课」标记的列表。
 
     风格与 RoundEntry 一致（圆角白底 + 主色高亮），但只读——课程名必须从
     扫描出来的列表里选，避免手输错字导致 enter_course 找不到课程。
 
-    items: [{name, brushable, note}]；通过 set_items() 更新。
+    v1.8.0 三处实测缺陷一起修（用户报的 bug1/bug2/bug8）：
+    1. **列表不会回弹**：旧实现没有设置 canvas 的 scrollregion，滚轮一滚就
+       把内容推出可视区、顶部/底部留一大片空白，而且再也回不来。现在显式设置
+       scrollregion 并在打开时 `yview_moveto(0)`，滚动由 Tk 自己夹紧。
+    2. **列表没有跟住文字框**：旧实现只在打开那一刻算一次坐标，窗口一移动/缩放
+       弹层就飘走。现在起一条 120ms 的跟随轮询，位置或宽度变了就跟着挪；
+       下方空间不够时自动翻到输入框上方。
+    3. **扫描时列表关不掉**：旧实现把「点外面关闭」绑在弹层自己身上，
+       点在主窗口的点击根本传不到它；而扫描期间输入框是 disabled，
+       再点一次也不响应 → 弹层彻底卡死。现在用「失去焦点即关闭」+ ESC +
+       再点一次即关闭，并且扫描一开始就主动收起弹层。
+
+    items: [{name, brushable, note, done, total, finished}]；通过 set_items() 更新。
     on_select(name) 选中回调；textvariable 同步纯课程名（去掉标记）。
     """
 
+    DONE_BG = "#1E3A8A"          # 刷完：深蓝底、白字
+    DONE_BG_SEL = "#1D4ED8"
+    DONE_TAG_BG = "#DBEAFE"
+    DONE_TAG_FG = "#1E3A8A"
+
     def __init__(self, master, textvariable=None, items=None, on_select=None,
-                 on_refresh=None, height=38, radius=10, width=200, placeholder="点右侧「扫描课程」选择", **kw):
+                 on_refresh=None, height=38, radius=10, width=200,
+                 placeholder="点右侧「扫描课程」选择", **kw):
         super().__init__(master, radius=radius, fill=CARD, outline=LINE_STRONG,
                          line_width=1, with_body=False, height=height, width=width, **kw)
         self._var = textvariable
@@ -636,12 +654,18 @@ class CoursePicker(RoundedCanvas):
         self._on_refresh = on_refresh
         self._placeholder = placeholder
         self._hover = False
+        self._disabled = False
         self._popup = None
+        self._popup_h = 0
+        self._popup_w = 0
+        self._popup_pos = None
+        self._follow_job = None
         self.configure(cursor="hand2")
         self.bind("<Enter>", lambda e: self._set_hover(True))
         self.bind("<Leave>", lambda e: self._set_hover(False))
         self.bind("<Button-1>", self._toggle)
 
+    # ---------- 数据 ----------
     def _set_hover(self, v):
         self._hover = v
         self._render()
@@ -659,49 +683,69 @@ class CoursePicker(RoundedCanvas):
         except Exception:
             return ""
 
+    def _item_of(self, name):
+        for it in self._items:
+            if it.get("name") == name:
+                return it
+        return None
+
+    @staticmethod
+    def _state_of(it):
+        """把条目归成 finished / brushable / empty / unknown 四态。"""
+        if not it:
+            return "empty"
+        if it.get("finished"):
+            return "finished"
+        if it.get("brushable"):
+            return "brushable"
+        if it.get("unknown") or it.get("brushable") is None:
+            return "unknown"
+        return "empty"
+
+    # ---------- 绘制 ----------
     def _render(self):
         w, h = self.winfo_width(), self.winfo_height()
         if w <= 1 or h <= 1:
             return
         self.delete("all")
-        outline = ACCENT if self._hover else LINE_STRONG
+        outline = LINE_STRONG if self._disabled else (ACCENT if self._hover else LINE_STRONG)
         self.create_polygon(rounded_points(0.5, 0.5, w - 0.5, h - 0.5, self._radius),
                             fill=CARD, outline=outline, width=1)
         txt = self._current_text()
         if txt:
-            # 当前选中的课如果带标记，也显示标记；
-            # 带 label 的条目（如「全部可刷课程」）直接用 label，不再拼标记。
-            mark, label = "", ""
-            for it in self._items:
-                if it.get("name") == txt:
-                    label = it.get("label") or ""
-                    mark = "（可刷）" if it.get("brushable") else "（无课）"
-                    break
+            it = self._item_of(txt)
+            label = (it or {}).get("label") or ""
+            mark = {"finished": "（刷完）", "brushable": "（可刷）",
+                    "empty": "（无课）", "unknown": "（未确认）"}[self._state_of(it)]
+            fg = TEXT_MUT if self._disabled else TEXT
             self.create_text(s(11), h / 2, anchor="w", text=label or (txt + mark),
-                             fill=TEXT, font=font(10))
+                             fill=fg, font=font(10))
         else:
             self.create_text(s(11), h / 2, anchor="w", text=self._placeholder,
                              fill=TEXT_MUT, font=font(9))
         # 右侧下拉箭头
         ax = w - s(16)
         self.create_polygon([ax - s(4), h / 2 - s(1), ax + s(4), h / 2 - s(1), ax, h / 2 + s(4)],
-                            fill=TEXT_SUB)
+                            fill=TEXT_MUT if self._disabled else TEXT_SUB)
 
     def config(self, cnf=None, **kw):
         if "state" in kw:
             self._disabled = (kw.pop("state") == "disabled")
             self.configure(cursor="arrow" if self._disabled else "hand2")
+            if self._disabled:
+                self._close_popup()      # 扫描/任务开始：先收起弹层，别挡住日志
         if cnf:
             super().config(cnf, **kw)
         elif kw:
             super().config(**kw)
         self._render()
 
+    # ---------- 开关 ----------
     def _toggle(self, _e):
-        if getattr(self, "_disabled", False):
-            return
-        if self._popup is not None:
+        if self._popup is not None:      # 再点一次就收起（disabled 时也允许收起）
             self._close_popup()
+            return
+        if self._disabled:
             return
         if not self._items:
             if self._on_refresh:
@@ -709,22 +753,81 @@ class CoursePicker(RoundedCanvas):
             return
         self._open_popup()
 
+    def close(self):
+        """外部主动收起（扫描课程开始时调用）。"""
+        self._close_popup()
+
+    def is_open(self):
+        return self._popup is not None
+
     def _close_popup(self):
-        if self._popup is not None:
+        pop, self._popup = self._popup, None
+        if self._follow_job:
             try:
-                self._popup.destroy()
+                self.after_cancel(self._follow_job)
             except Exception:
                 pass
-            self._popup = None
+            self._follow_job = None
+        if pop is not None:
+            try:
+                pop.destroy()
+            except Exception:
+                pass
+
+    # ---------- 弹层 ----------
+    def _row_of(self, parent, it, cur):
+        """画一行。刷完的课用深蓝底 + 白字，一眼区分「可刷」和「已刷完」。"""
+        name = it.get("name", "")
+        state = self._state_of(it)
+        selected = (name == cur)
+        if state == "finished":
+            bg = self.DONE_BG_SEL if selected else self.DONE_BG
+            fg = "#FFFFFF"
+        elif selected:
+            bg = ACCENT_SOFT
+            fg = ACCENT
+        else:
+            bg = CARD
+            fg = TEXT
+        row = tk.Frame(parent, bg=bg, height=s(40), cursor="hand2")
+        row.pack(fill="x", padx=s(8), pady=s(2))
+        row.pack_propagate(False)
+        tk.Label(row, text=it.get("label") or name, bg=bg, fg=fg,
+                 font=font(9), anchor="w").pack(side="left", padx=(s(10), s(4)))
+
+        tag = it.get("tag") or {"finished": "刷完", "brushable": "可刷",
+                                "empty": "无课", "unknown": "未确认"}[state]
+        tag_bg, tag_fg = (self.DONE_TAG_BG, self.DONE_TAG_FG)
+        if state == "brushable":
+            tag_bg, tag_fg = GREEN_SOFT, GREEN
+        elif state == "empty":
+            tag_bg, tag_fg = "#F2F4F8", TEXT_MUT
+        elif state == "unknown":
+            tag_bg, tag_fg = "#FEF3C7", "#B45309"
+        tag_lbl = tk.Label(row, text=tag, bg=tag_bg, fg=tag_fg, font=font(8, "bold"))
+        tag_lbl.pack(side="right", padx=(s(4), s(10)))
+
+        # 进度（如 12/20）放在标签左边，刷完的那门就不用再点复核了
+        total = int(it.get("total") or 0)
+        if total:
+            done = int(it.get("done") or 0)
+            tk.Label(row, text=f"{done}/{total}", bg=bg,
+                     fg="#DBEAFE" if state == "finished" else TEXT_MUT,
+                     font=font(8)).pack(side="right", padx=(0, s(6)))
+        for wd in (row, tag_lbl) + tuple(row.winfo_children()):
+            wd.bind("<Button-1>", lambda e, n=name: self._choose(n))
+        return row
+
+    def _choose(self, name):
+        if self._var:
+            self._var.set(name)
+        self._render()
+        self._close_popup()
+        if self._on_select:
+            self._on_select(name)
 
     def _open_popup(self):
-        """弹出无边框列表窗，定位在本控件正下方，宽度与控件一致。"""
         self.update_idletasks()
-        x = self.winfo_rootx()
-        y = self.winfo_rooty() + self.winfo_height() + s(4)
-        w = self.winfo_width()
-        max_h = s(360)
-
         pop = tk.Toplevel(self)
         pop.withdraw()
         pop.overrideredirect(True)
@@ -737,62 +840,129 @@ class CoursePicker(RoundedCanvas):
         head.pack(fill="x", padx=s(10), pady=(s(9), s(4)))
         tk.Label(head, text="选择课程", bg=CARD, fg=TEXT_SUB,
                  font=font(8, "bold")).pack(side="left")
+        n_fin = sum(1 for x in self._items if self._state_of(x) == "finished")
+        if n_fin:
+            tk.Label(head, text=f"已刷完 {n_fin}", bg=CARD, fg=ACCENT,
+                     font=font(8)).pack(side="left", padx=(s(8), 0))
         refresh = tk.Label(head, text="↻ 重新扫描", bg=CARD, fg=ACCENT,
                            font=font(8), cursor="hand2")
         refresh.pack(side="right")
         refresh.bind("<Button-1>", lambda e: (self._close_popup(),
                                               self._on_refresh() if self._on_refresh else None))
 
-        # 可滚动列表（Canvas + 内部 frame）
+        # 列表：Canvas + 内部 Frame，显式 scrollregion（否则滚轮会把内容推出视野）
         canvas = tk.Canvas(frame, bg=CARD, highlightthickness=0, bd=0)
-        canvas.pack(side="left", fill="both", expand=True, pady=(0, s(8)))
+        canvas.pack(side="left", fill="both", expand=True, pady=(0, s(6)))
         inner = tk.Frame(canvas, bg=CARD)
-        cw = w - s(20)
-        canvas.create_window((0, 0), window=inner, anchor="nw", width=cw)
-
-        def on_row(name):
-            if self._var:
-                self._var.set(name)
-            self._render()
-            self._close_popup()
-            if self._on_select:
-                self._on_select(name)
+        win = canvas.create_window((0, 0), window=inner, anchor="nw")
 
         cur = self._current_text()
         for it in self._items:
-            name = it.get("name", "")
-            brush = bool(it.get("brushable"))
-            row = tk.Frame(inner, bg=ACCENT_SOFT if name == cur else CARD,
-                           height=s(38), cursor="hand2")
-            row.pack(fill="x", padx=s(8), pady=s(2))
-            row.pack_propagate(False)
-            tk.Label(row, text=it.get("label") or name, bg=row.cget("bg"),
-                     fg=ACCENT if name == cur else TEXT,
-                     font=font(9), anchor="w").pack(side="left", padx=(s(10), s(4)))
-            tag = it.get("tag") or ("可刷" if brush else "无课")
-            tag_bg = GREEN_SOFT if brush else "#F2F4F8"
-            tag_fg = GREEN if brush else TEXT_MUT
-            tag_lbl = tk.Label(row, text=tag, bg=tag_bg, fg=tag_fg, font=font(8, "bold"))
-            tag_lbl.pack(side="right", padx=(s(4), s(10)))
-            for wd in (row, tag_lbl):
-                wd.bind("<Button-1>", lambda e, n=name: on_row(n))
+            self._row_of(inner, it, cur)
 
-        inner.update_idletasks()
-        need_h = inner.winfo_reqheight() + s(52)
-        pop_h = min(max_h, max(s(120), need_h))
-        pop.geometry(f"{w}x{pop_h}+{x}+{y}")
+        def sync_region(_e=None):
+            try:
+                h = max(inner.winfo_reqheight(), canvas.winfo_height())
+                canvas.configure(scrollregion=(0, 0, canvas.winfo_width(), h))
+            except Exception:
+                pass
 
-        # 滚轮绑定
+        def on_canvas_size(e):
+            try:
+                canvas.itemconfigure(win, width=max(1, e.width))
+            except Exception:
+                pass
+            sync_region()
+
+        inner.bind("<Configure>", sync_region)
+        canvas.bind("<Configure>", on_canvas_size)
+
         def wheel(e):
-            canvas.yview_scroll(-1 if e.delta > 0 else 1, "units")
-        canvas.bind_all("<MouseWheel>", wheel)
-        pop.bind("<Destroy>", lambda e: canvas.unbind_all("<MouseWheel>"))
-        # 点外面关闭
-        def outside(e):
-            if pop.winfo_exists() and not (x <= e.x_root <= x + w and y <= e.y_root <= y + pop_h):
-                self._close_popup()
-        pop.bind("<Button-1>", outside, add="+")
+            try:
+                need = inner.winfo_reqheight() > canvas.winfo_height() + 1
+                if not need:
+                    return "break"
+                canvas.yview_scroll(-1 if e.delta > 0 else 1, "units")
+            except Exception:
+                pass
+            return "break"
+
+        def bind_wheel(w):
+            w.bind("<MouseWheel>", wheel)
+            for c in w.winfo_children():
+                bind_wheel(c)
+        bind_wheel(pop)
+
+        pop.update_idletasks()
+        need_h = inner.winfo_reqheight() + head.winfo_reqheight() + s(18)
+        max_h = s(360)
+        pop_h = min(max_h, max(s(120), need_h))
+        pop_w = max(s(240), self.winfo_width())
+        x = self.winfo_rootx()
+        y = self.winfo_rooty() + self.winfo_height() + s(4)
+        # 下方放不下就翻到输入框上方，避免弹层被屏幕边缘截掉
+        try:
+            sh = pop.winfo_screenheight()
+            if y + pop_h > sh - s(20):
+                above = self.winfo_rooty() - pop_h - s(4)
+                if above > s(20):
+                    y = above
+        except Exception:
+            pass
+        pop.geometry(f"{pop_w}x{pop_h}+{x}+{y}")
+        canvas.yview_moveto(0)          # 打开永远从顶部开始（回弹）
+
+        # 关闭方式：ESC / 再点一次输入框 / 点主窗口任意处（失去焦点）/ 选中某行
+        pop.bind("<Escape>", lambda e: self._close_popup())
+        pop.bind("<FocusOut>", lambda e: self.after(120, self._on_focus_out))
 
         self._popup = pop
+        self._popup_h, self._popup_w = pop_h, pop_w
+        self._popup_pos = (x, y)
         pop.deiconify()
         pop.lift()
+        try:
+            pop.focus_force()           # 有焦点才能用 FocusOut 感知「点到别处」
+            pop.grab_release()
+        except Exception:
+            pass
+        self._follow()
+
+    def _on_focus_out(self):
+        """弹层失焦 = 用户点到主界面别处了 → 收起。
+
+        旧实现把「点外面关闭」绑在弹层自己身上，点主窗口的点击根本传不到它，
+        扫描时输入框又是 disabled，于是弹层再也关不掉。
+        """
+        if self._popup is None:
+            return
+        try:
+            focused = self._popup.focus_get()
+        except Exception:
+            focused = None
+        if focused is not None and str(focused).startswith(str(self._popup)):
+            return
+        self._close_popup()
+
+    def _follow(self):
+        """跟随输入框：位置/宽度变了就同步，输入框被隐藏就收起。"""
+        self._follow_job = None
+        pop = self._popup
+        if pop is None:
+            return
+        try:
+            if not self.winfo_exists() or not self.winfo_ismapped():
+                self._close_popup()
+                return
+            x = self.winfo_rootx()
+            y = self.winfo_rooty() + self.winfo_height() + s(4)
+            w = max(s(240), self.winfo_width())
+            # 和自己记下的目标位置比，而不是回读 popup 的实际位置：
+            # Tk 的 geometry 是异步生效的，回读会一直判「变了」，导致每 120ms 重复设置。
+            if (x, y) != self._popup_pos or w != self._popup_w:
+                pop.geometry(f"{w}x{self._popup_h}+{x}+{y}")
+                self._popup_pos, self._popup_w = (x, y), w
+        except Exception:
+            self._close_popup()
+            return
+        self._follow_job = self.after(120, self._follow)
