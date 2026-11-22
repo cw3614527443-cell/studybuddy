@@ -116,6 +116,10 @@ class Browser:
     def frames(self):
         return [x['url'] for x in self.ok({'type': 'frames'})]
 
+    def fill(self, selector, value):
+        """填输入框（走 Playwright 的 fill，会派发 input 事件，受控输入也能识别）。"""
+        return self.ok({'type': 'fill', 'selector': selector, 'value': value}, timeout=45)
+
     def click(self, selector=None, text=None, frame=None, settle=1500, timeout=15000):
         cmd = {'type': 'click', 'settle': settle, 'timeout': timeout}
         if selector:

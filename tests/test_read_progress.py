@@ -54,6 +54,12 @@ class FakeZjy:
     def __init__(self, total=61, done=40):
         self.total, self.done = total, done
         self.verify_called = 0
+        self.entered = None
+
+    def enter_course(self, name):
+        # v1.7.0 起 zjy2 读进度前必须先按课程名进入（否则读到别的课）
+        self.entered = name
+        return True
 
     def verify(self):
         self.verify_called += 1

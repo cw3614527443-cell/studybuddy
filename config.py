@@ -72,7 +72,7 @@ DEFAULT_TARGET_HOURS = 5.0
 CDP_PORT = int(os.environ.get("SB_CDP_PORT") or 9222)
 
 APP_NAME = "StudyBuddy 学习助手"
-APP_VERSION = "1.6.0"
+APP_VERSION = "1.7.0"
 
 
 # ---------------------------------------------------------------------------
@@ -102,11 +102,17 @@ def load_settings():
         data = {}
     llm = dict(DEFAULT_LLM)
     llm.update({k: v for k, v in (data.get("llm") or {}).items() if v is not None})
-    return {"llm": llm}
+    # v1.7.0：账号密码登录记住的账号（按平台分开存）
+    accounts = {}
+    for plat, item in (data.get("accounts") or {}).items():
+        if isinstance(item, dict) and item.get("user"):
+            accounts[plat] = {"user": item.get("user") or "",
+                              "pwd": item.get("pwd") or ""}
+    return {"llm": llm, "accounts": accounts}
 
 
 def save_settings(settings):
-    """写设置（仅本机，明文保存 Key，界面上要提示这一点）。"""
+    """写设置（仅本机，明文保存 Key / 密码，界面上要提示这一点）。"""
     import json
     try:
         with open(SETTINGS_PATH, "w", encoding="utf-8") as f:
@@ -114,6 +120,30 @@ def save_settings(settings):
         return True
     except Exception:
         return False
+
+
+# ---------------------------------------------------------------------------
+# 账号密码登录：按平台记住账号
+# ---------------------------------------------------------------------------
+def load_account(platform):
+    """取某个平台记住的账号；没有就返回空字典。"""
+    return dict(load_settings()["accounts"].get(platform) or {})
+
+
+def save_account(platform, user, password, remember=True):
+    """记住 / 清除账号。
+
+    remember=False 时只清除，不写入——「不记住」必须真的不落盘，
+    否则替别人刷完课就把人家密码留在本机了。
+    """
+    cfg = load_settings()
+    accounts = cfg["accounts"]
+    if remember and user:
+        accounts[platform] = {"user": user, "pwd": password or ""}
+    else:
+        accounts.pop(platform, None)
+    cfg["accounts"] = accounts
+    return save_settings(cfg)
 
 
 def llm_config():

@@ -428,13 +428,16 @@ class RoundEntry(RoundedCanvas):
     """圆角输入框：画布画外框，内部放原生 Entry。"""
 
     def __init__(self, master, textvariable=None, height=38, radius=10, width=140,
-                 suffix="", **kw):
+                 suffix="", field_bg=None, **kw):
         super().__init__(master, radius=radius, fill=CARD, outline=LINE_STRONG,
                          line_width=1, with_body=False, height=height, width=width, **kw)
         self._suffix = suffix
         self._focused = False
+        # field_bg：给输入区一点底色。白底 + 极浅边框在弹窗里几乎看不出边界，
+        # 用户会不知道点哪儿；主界面沿用白色，弹窗传淡灰。
+        self._field_bg = field_bg or CARD
         self.entry = tk.Entry(self, textvariable=textvariable, bd=0, relief="flat",
-                              bg=CARD, fg=TEXT, insertbackground=ACCENT,
+                              bg=self._field_bg, fg=TEXT, insertbackground=ACCENT,
                               highlightthickness=0, font=font(10),
                               disabledbackground="#F7F8FC", disabledforeground=TEXT_MUT)
         self.entry.bind("<FocusIn>", self._on_focus)
@@ -455,7 +458,7 @@ class RoundEntry(RoundedCanvas):
         self.delete("all")
         outline = ACCENT if self._focused else LINE_STRONG
         self.create_polygon(rounded_points(0.5, 0.5, w - 0.5, h - 0.5, self._radius),
-                            fill=CARD, outline=outline, width=1)
+                            fill=self._field_bg, outline=outline, width=1)
         right = w - s(12)
         if self._suffix:
             self.create_text(w - s(12), h / 2, text=self._suffix, anchor="e",
@@ -666,13 +669,15 @@ class CoursePicker(RoundedCanvas):
                             fill=CARD, outline=outline, width=1)
         txt = self._current_text()
         if txt:
-            # 当前选中的课如果带标记，也显示标记
-            mark = ""
+            # 当前选中的课如果带标记，也显示标记；
+            # 带 label 的条目（如「全部可刷课程」）直接用 label，不再拼标记。
+            mark, label = "", ""
             for it in self._items:
                 if it.get("name") == txt:
+                    label = it.get("label") or ""
                     mark = "（可刷）" if it.get("brushable") else "（无课）"
                     break
-            self.create_text(s(11), h / 2, anchor="w", text=txt + mark,
+            self.create_text(s(11), h / 2, anchor="w", text=label or (txt + mark),
                              fill=TEXT, font=font(10))
         else:
             self.create_text(s(11), h / 2, anchor="w", text=self._placeholder,
@@ -761,10 +766,10 @@ class CoursePicker(RoundedCanvas):
                            height=s(38), cursor="hand2")
             row.pack(fill="x", padx=s(8), pady=s(2))
             row.pack_propagate(False)
-            tk.Label(row, text=name, bg=row.cget("bg"),
+            tk.Label(row, text=it.get("label") or name, bg=row.cget("bg"),
                      fg=ACCENT if name == cur else TEXT,
                      font=font(9), anchor="w").pack(side="left", padx=(s(10), s(4)))
-            tag = "可刷" if brush else "无课"
+            tag = it.get("tag") or ("可刷" if brush else "无课")
             tag_bg = GREEN_SOFT if brush else "#F2F4F8"
             tag_fg = GREEN if brush else TEXT_MUT
             tag_lbl = tk.Label(row, text=tag, bg=tag_bg, fg=tag_fg, font=font(8, "bold"))

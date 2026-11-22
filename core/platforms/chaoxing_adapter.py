@@ -88,10 +88,13 @@ class _LogWriter:
     def __init__(self, bus):
         self.bus = bus
         self.buf = ""
+        # 防重入：如果 bus.log 自己也往 stdout 写（第三方日志器、调试 print），
+        # 转发链会自我递归直到 RecursionError。这里直接丢弃内层输出。
+        self._busy = False
 
     def write(self, s):
-        if not s:
-            return 0
+        if not s or self._busy:
+            return len(str(s))
         self.buf += str(s)
         while "\n" in self.buf:
             line, self.buf = self.buf.split("\n", 1)
@@ -104,8 +107,15 @@ class _LogWriter:
         self.buf = ""
 
     def _line(self, line):
-        if not line:
+        if not line or self._busy:
             return
+        self._busy = True
+        try:
+            self._emit(line)
+        finally:
+            self._busy = False
+
+    def _emit(self, line):
         # 二维码出来就立刻推给「最新画面」，用户不用去文件夹里找截图
         m = re.search(r"二维码截图[:：]\s*(\S+\.png)", line)
         if m:
@@ -279,7 +289,7 @@ class ChaoxingSuite:
         kwargs = {}
         if os.name == "nt":
             kwargs["creationflags"] = getattr(subprocess, "CREATE_NO_WINDOW", 0)
-        self.bus.log("正在启动学习通浏览器（独立窗口，首次需扫码登录）…")
+        self.bus.log("正在启动学习通浏览器（独立窗口，扫码或账号密码都可以）…")
         self.proc = subprocess.Popen(
             [node, agent], cwd=suite_dir(), env=env,
             stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
@@ -305,12 +315,19 @@ class ChaoxingSuite:
                 self.bus.shot(shot)
         return self.browser()
 
+    # 驱动的每条指令都会回一行「<id> <type> OK」，一次刷课几百条，
+    # 全塞进界面日志会把有用的信息顶走。只保留出错与关键阶段。
+    _DRIVER_NOISE = re.compile(r"^c\d+-\d+ \w+ OK\s*$")
+
     def _pump_agent(self):
         try:
             for line in self.proc.stdout or ():
                 line = line.rstrip()
-                if line:
-                    self.bus.log("[driver] " + line[:300])
+                if not line or self._DRIVER_NOISE.match(line):
+                    continue
+                if " ERR " in line or line.startswith(("QR READY", "NAV ERROR")):
+                    self.bus.log("[driver] " + line[:300],
+                                 "error" if " ERR " in line else "info")
         except Exception:
             pass
 
@@ -380,6 +397,30 @@ class ChaoxingSuite:
             raise RuntimeError("看起来还没登录成功（仍停在登录页）。"
                                "请重新点「① 启动浏览器 / 登录」，在弹出窗口里扫码或用账号密码登录")
         return "学习通已登录"
+
+    def login_with_password(self, user, password, wait_seconds=180):
+        """账号密码登录。
+
+        平台会弹滑块：驱动自动填表并提交，出现滑块时日志提示用户拖一次，
+        程序继续轮询，成功即返回。**不要让异常吞掉提示**，否则用户只会看到「没反应」。
+        """
+        self.ensure_agent()
+        b = self.browser()
+        self.bus.log("正在填入账号密码并提交…")
+        res = self._call(self.modules()["run"].cmd_login_password, b,
+                         user, password, wait_s=wait_seconds)
+        if not isinstance(res, dict):
+            raise RuntimeError("登录返回异常：%r" % (res,))
+        if res.get("reason") == "stopped":
+            return "已停止等待登录"
+        if res.get("logged_in"):
+            try:
+                self.bus.shot(os.path.join(self.root, "shots", "login-ok.png"))
+            except Exception:
+                pass
+            return "学习通已登录（账号密码）"
+        raise RuntimeError("账号密码登录没成功：%s。可点「扫码 / 手动登录」，"
+                           "在弹出的窗口里自己登录一次" % (res.get("reason") or "未知原因"))
 
     def list_courses(self):
         self.ensure_agent()

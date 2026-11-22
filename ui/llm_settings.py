@@ -12,7 +12,7 @@
 """
 import tkinter as tk
 
-from config import llm_config, save_settings
+from config import llm_config, load_settings, save_settings
 from core.llm import LLMClient
 import ui.widgets as W
 
@@ -116,7 +116,10 @@ class LLMSettingsDialog:
         if not (cfg["base"] and cfg["model"] and cfg["key"]):
             self.msg.config(text="接口地址 / 模型名 / Key 三项都要填", fg="#C0392B")
             return
-        if save_settings({"llm": cfg}):
+        # 读-改-写：settings.json 里还有登录账号等其它键，整体覆盖会丢数据
+        data = load_settings()
+        data["llm"] = cfg
+        if save_settings(data):
             if self.on_saved:
                 try:
                     self.on_saved(cfg)

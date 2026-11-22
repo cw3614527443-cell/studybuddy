@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>仿智慧职教统一认证（自检用）</title>
+<style>
+  body { font-family: sans-serif; }
+  .u-captcha { display: block; padding: 10px; border: 1px solid #ddd; }
+  .el-form .login { display: inline-block; padding: 8px 20px; background: #2b5fd9; color: #fff; cursor: pointer; }
+</style>
+</head>
+<body>
+<div id="app">
+  <div class="title">欢迎登录</div>
+  <span id="tab-sms">手机验证码登录</span>
+  <span id="tab-pwd">账号密码登录</span>
+
+  <form class="el-form demo-ruleForm">
+    <div class="el-form-item"><input type="text" placeholder="请输入账号" class="el-input__inner"></div>
+    <div class="el-form-item"><input type="password" placeholder="请输入密码" class="el-input__inner"></div>
+    <div class="agreement">
+      <label class="el-checkbox el">
+        <span class="el-checkbox__input"><span class="el-checkbox__inner"></span>
+          <input type="checkbox"></span>
+      </label>
+      <div class="content"> 我已阅读并同意 <span>用户服务协议</span> ， <span>隐私协议</span></div>
+    </div>
+    <div class="login" id="submit">登录</div>
+  </form>
+  <div id="msg"></div>
+</div>
+<script>
+  document.querySelector('#submit').addEventListener('click', function () {
+    var u = document.querySelector('input[placeholder="请输入账号"]').value;
+    var p = document.querySelector('input[placeholder="请输入密码"]').value;
+    var agreed = document.querySelector('.agreement input').checked;
+    var msg = document.querySelector('#msg');
+    if (!agreed) { msg.textContent = '请先阅读并同意用户服务协议'; return; }
+    if (!u || !p) { msg.textContent = '请输入账号和密码'; return; }
+    if (p === 'bad') { msg.textContent = '账号或密码错误'; return; }
+    if (window.NEED_CAPTCHA) {
+      var d = document.createElement('div');
+      d.className = 'u-captcha';
+      d.textContent = '请完成安全验证 向右拖动滑块填充拼图';
+      document.body.appendChild(d);
+      setTimeout(function () { location.href = 'home.html'; }, 2000);
+    } else {
+      location.href = 'home.html';
+    }
+  });
+</script>
+</body>
+</html>

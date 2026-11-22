@@ -18,10 +18,12 @@ import time
 import tkinter as tk
 from tkinter import messagebox
 
-from config import APP_NAME, APP_VERSION, AI_ICVE_HOME, DEFAULT_TARGET_HOURS
+from config import (APP_NAME, APP_VERSION, AI_ICVE_HOME, DEFAULT_TARGET_HOURS,
+                    save_account)
 from core.events import EventBus
 from core.tasks import TaskRunner
 from ui import widgets as W
+from ui.login_dialog import LoginDialog
 
 
 class App:
@@ -46,7 +48,7 @@ class App:
             "host": "v8.chaoxing.com · mooc2",
             "feature": "独立浏览器，视频要真实播完",
             "tags": "刷课 · 答题 · 有头窗口",
-            "desc": "首次在弹出窗口扫码或账密登录；窗口不要最小化。\n"
+            "desc": "①可选账号密码登录（滑块需人工拖一次）；窗口不要最小化。\n"
                     "视频必须 1 倍速播到结尾平台才认任务点，耗时≈视频总时长。",
         },
     }
@@ -449,11 +451,25 @@ class App:
         items = data.get("items") or []
         self._courses = items
         self._courses_platform = data.get("platform")
-        self.course_picker.set_items(items)
-        # 若当前选中的课不在新列表里，自动选中第一个（优先可刷的）
+        # 可刷课程 ≥2 门时，列表顶部加一条「全部可刷课程」：
+        # 替别人刷课常常一账号十几门，一门门点太费事。
+        n_brush = sum(1 for x in items if x.get("brushable"))
+        picker_items = list(items)
+        if n_brush >= 2:
+            picker_items.insert(0, {
+                "name": "__all__",
+                "label": f"★ 全部可刷课程（{n_brush} 门）",
+                "brushable": True, "tag": "批量", "note": "全部",
+            })
+        self.course_picker.set_items(picker_items)
+        # 若当前选中的课不在新列表里，自动选中第一门具体课程
+        # （不默认选「全部可刷」，误点③一下刷十几门课代价太大）
         cur = self.course_var.get()
-        if items and not any(x.get("name") == cur for x in items):
-            first = next((x for x in items if x.get("brushable")), items[0])
+        names = [x.get("name") for x in picker_items]
+        if picker_items and cur not in names:
+            first = next((x for x in picker_items
+                          if x.get("brushable") and x.get("name") != "__all__"),
+                         picker_items[-1])
             self.course_var.set(first["name"])
             self.course_picker._render()
         self._refresh_course_hint()
@@ -507,17 +523,22 @@ class App:
         if ans is None:
             return
         dry = (ans is False)
+        # tkinter 变量只能在主线程读：先取值再丢给后台线程
+        platform, course = self.platform_var.get(), self.course_var.get()
         self._run(lambda: self.runner.action_answer_quiz(
-            self.platform_var.get(), self.course_var.get(), dry_run=dry), nav="quiz")
+            platform, course, dry_run=dry), nav="quiz")
 
     def on_help(self):
         messagebox.showinfo(
             "功能说明 · StudyBuddy",
             "① 启动浏览器 / 登录\n"
-            "    AI 优课 / zjy2：拉起受控 Edge 窗口，首次在里面扫码登录。\n"
-            "    学习通：拉起独立的 Chrome/Edge 窗口（平台要求有头、不能失焦），\n"
-            "    首次要用学习通 App 扫二维码；扫码后日志会提示「已跳转」。\n"
-            "    登录一次后，只要不点「关闭浏览器」，下次打开仍在登录状态。\n\n"
+            "    点开会先问登录方式，两种都支持：\n"
+            "    · 账号密码：自动填表提交。三个平台通用，替别人刷课时不用找本人手机；\n"
+            "      平台会弹一次滑块拼图，请在弹出的浏览器窗口里拖一下，拖完程序自动继续。\n"
+            "      勾选「记住账号密码」后，下次点①直接登录（明文存本机，公用电脑别勾）。\n"
+            "    · 扫码 / 手动：在弹出的窗口里自己扫码或输账号密码。\n"
+            "    登录一次后，只要不点「关闭浏览器」，下次打开仍在登录状态。\n"
+            "    学习通使用独立的 Chrome/Edge 窗口（平台要求有头、不能失焦）。\n\n"
             "【扫描课程】选好平台后，点任务参数里的「扫描课程」\n"
             "    自动读取你在该平台的全部课程，列成下拉框；每项旁边标着\n"
             "    「可刷」（教学内容里有视频/文档）或「无课」（教学内容是空的）。\n"
@@ -538,6 +559,8 @@ class App:
             "      两类续播弹窗都会自动点掉，日志会记一行；\n"
             "    · 连续 2 项进度都没涨会自动停止，不会在 0% 状态下白刷整门课；\n"
             "    · 目录里的测验 / 作业 / 考试不会自动作答，会列出来提醒你自己做。\n"
+            "    · 想一次刷完账号下所有课：课程下拉选「★ 全部可刷课程」，再点③。\n"
+            "      无课自动跳过，每门刷完有小结，最后汇总失败清单；停止按钮门与门之间生效。\n"
             "    学习通：视频不能拖进度条，必须 1 倍速播到结尾（耗时≈视频时长）；\n"
             "    脚本会静音、防失焦暂停、自动关续播弹窗，并只认视频上的绿标，\n"
             "    不把右边目录的橙色误判成没刷完。窗口别最小化。\n\n"
@@ -599,23 +622,57 @@ class App:
             self.prog.set_value(0)
 
     def on_open_site(self):
+        """①：先问清「账号密码」还是「扫码 / 手动」，再动手。
+
+        替别人刷课时账号主往往不在旁边，扫码不现实，所以登录方式要能选。
+        """
+        if self.runner.is_running():
+            return
         platform = self.platform_var.get()
+        LoginDialog(self.root, platform,
+                    on_submit=lambda choice: self._start_login(platform, choice)).show()
+
+    def _start_login(self, platform, choice):
+        if self.runner.is_running():        # 弹窗开着时可能已经点了别的任务
+            return
+        login = None
+        if choice.get("mode") == "password":
+            user, pwd = choice["user"], choice["pwd"]
+            remember = bool(choice.get("remember"))
+            save_account(platform, user, pwd, remember=remember)
+            login = {"user": user, "pwd": pwd}
+            if remember:
+                self.bus.log("已记住该账号，下次打开可直接登录（密码明文存于本机设置文件）")
+            else:
+                self.bus.log("本次不保存账号密码，关闭浏览器后需重新输入")
+        else:
+            self.bus.log("手动登录：在弹出的浏览器窗口里扫码或用账号密码登录")
 
         def job():
             if platform == "cx":
-                return self.runner.action_open_site("", platform="cx")
-            self.bus.log("启动受控浏览器（首次需在弹出的窗口里登录）…")
+                return self.runner.action_open_site("", platform="cx", login=login)
+            self.bus.log("启动受控浏览器…")
             return self.runner.action_open_site(AI_ICVE_HOME, attach=False,
-                                                platform=platform)
+                                                platform=platform, login=login)
         self._run(job, nav="open")
 
     def on_read_time(self):
-        self._run(lambda: self.runner.action_read_time(self.platform_var.get(),
-                                                       self.course_var.get()), nav="read")
+        platform, course = self.platform_var.get(), self.course_var.get()
+        self._run(lambda: self.runner.action_read_time(platform, course), nav="read")
 
     def on_brush(self):
-        self._run(lambda: self.runner.action_brush_course(self.platform_var.get(),
-                                                          self.course_var.get()), nav="brush")
+        name = self.course_var.get()
+        if not name:
+            messagebox.showinfo("先选课程", "还没选课程。点「扫描课程」识别后再选一门，"
+                                            "或选「全部可刷课程」批量刷。")
+            return
+        courses = list(self._courses) if name == "__all__" else None
+        if name == "__all__" and not any(c.get("brushable") for c in (courses or [])):
+            messagebox.showinfo("没有可刷课程", "扫描结果里没有可刷课程，先点「扫描课程」重新识别。")
+            return
+        platform = self.platform_var.get()
+        self._run(lambda: self.runner.action_brush_course(platform, name, courses),
+                  nav="brush")
 
     def on_watch(self):
         try:
@@ -624,12 +681,13 @@ class App:
         except ValueError:
             messagebox.showerror("参数错误", "目标时长与最长挂机需为数字")
             return
-        self._run(lambda: self.runner.action_watch_time(
-            h, m, platform=self.platform_var.get()), nav="watch")
+        platform = self.platform_var.get()
+        self._run(lambda: self.runner.action_watch_time(h, m, platform=platform),
+                  nav="watch")
 
     def on_verify(self):
-        self._run(lambda: self.runner.action_verify(self.platform_var.get(),
-                                                    self.course_var.get()), nav="verify")
+        platform, course = self.platform_var.get(), self.course_var.get()
+        self._run(lambda: self.runner.action_verify(platform, course), nav="verify")
 
     def on_stop(self):
         self.runner.stop()

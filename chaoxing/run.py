@@ -1,6 +1,7 @@
 """run.py —— 统一入口。
 
     python run.py login            # 打开登录页并截图，等你扫码；扫完自动检测并落盘
+    python run.py login-pwd 账号 密码   # 账号密码登录（滑块需人工拖一次）
     python run.py courses           # 只扫描课程列表（StudyBuddy「扫描课程」用）
     python run.py open [关键词]     # 进个人空间 -> 找课程 -> 打开课程学习页，写 io/session.json
     python run.py catalog          # 解析章节目录，打印待完成清单
@@ -69,6 +70,99 @@ def cmd_login(b, wait_s=180):
     if not logged:
         print('仍在登录页，后面扫描课程会失败；请重新点①并登录', flush=True)
     return {'ok': True, 'logged_in': logged}
+
+
+def cmd_login_password(b, user, password, wait_s=180):
+    """账号密码登录（StudyBuddy「账号密码登录」用）。
+
+    平台在提交账号密码后会弹滑块拼图，脚本无法也不应绕过：
+    这里自动填表、勾选、提交，出现滑块时打印提示并继续等用户拖完。
+
+    返回 {'ok': bool, 'logged_in': bool, 'reason': str}
+    """
+    try:
+        cur = b.js('return location.href;', timeout=15) or ''
+    except Exception:
+        cur = ''
+    if cur and 'v8.chaoxing.com' not in cur:
+        print('当前已是登录状态，无需再登录')
+        return {'ok': True, 'logged_in': True, 'reason': 'already'}
+
+    b.goto('https://v8.chaoxing.com/', settle=6000)
+
+    # 1) 确保停在「账号登录」标签（页面默认可能停在扫码页，且会异步切换）
+    def has_form():
+        try:
+            return bool(b.js("return !!document.querySelector('#uunnmm');", timeout=15))
+        except Exception:
+            return False
+
+    for _ in range(3):
+        if has_form():
+            break
+        try:
+            b.click(text='账号登录', settle=1500)
+        except Exception:
+            pass
+        b.wait(1200)
+    if not has_form():
+        print('没找到账号登录表单，页面可能改版', flush=True)
+        return {'ok': False, 'logged_in': False, 'reason': '找不到账号登录表单'}
+
+    # 2) 填账号密码（受控输入：fill 会派发 input 事件，超星的按钮才会解禁）
+    b.fill('#uunnmm', user)
+    b.fill('#pwd', password)
+    b.wait(600)
+    try:
+        got = b.js("return (document.querySelector('#uunnmm')||{}).value || '';", timeout=15) or ''
+    except Exception:
+        got = user
+    if got != user:
+        print('账号没填进去，重试一次…', flush=True)
+        b.click(selector='#uunnmm', settle=500)
+        b.fill('#uunnmm', user)
+        b.wait(400)
+
+    # 3) 提交
+    print('已填入账号密码，点登录…', flush=True)
+    try:
+        b.click(selector='#login', settle=2500, timeout=15000)
+    except Exception as e:
+        return {'ok': False, 'logged_in': False, 'reason': '点不动登录按钮：%s' % e}
+
+    # 4) 等结果；出现滑块就提示一次，然后继续等人工拖完
+    t0 = time.time()
+    told = False
+    while time.time() - t0 < wait_s:
+        if stopped():
+            print('已请求停止，不再等待登录', flush=True)
+            return {'ok': False, 'logged_in': False, 'reason': 'stopped'}
+        # 别只取 innerText 前 400 字：滑块文案在页面末尾，会被截掉。
+        # 直接在页面里算好标记，既准又快。
+        probe = (
+            'return JSON.stringify({'
+            'url: location.href,'
+            "captcha: !!document.querySelector('.u-captcha, .cx_slider_tip, [class*=verify-slide]'),"
+            "err: (document.body.innerText.match(/账号或密码(错误|不正确)|密码错误/)||[''])[0]"
+            '});')
+        try:
+            info = json.loads(b.js(probe, timeout=15) or '{}')
+        except Exception:
+            info = {}
+        url = info.get('url', '')
+        if url and 'v8.chaoxing.com' not in url:
+            print('登录成功:', url, flush=True)
+            return {'ok': True, 'logged_in': True, 'reason': 'ok'}
+        if not told and info.get('captcha'):
+            told = True
+            print('平台要求滑块验证：请在浏览器窗口里向右拖动滑块，拖完程序会自动继续…', flush=True)
+        if info.get('err') and not info.get('captcha'):
+            print('平台提示账号或密码不正确', flush=True)
+            return {'ok': False, 'logged_in': False, 'reason': '账号或密码错误'}
+        time.sleep(1.5)
+
+    print('等待登录超时', flush=True)
+    return {'ok': False, 'logged_in': False, 'reason': '等待登录超时（%d 秒）' % wait_s}
 
 
 def list_courses(b):
@@ -161,6 +255,12 @@ def main():
         cmd_status(b)
     elif cmd == 'login':
         cmd_login(b)
+    elif cmd == 'login-pwd':
+        if len(rest) < 2:
+            print('用法: python run.py login-pwd <账号> <密码>')
+            return
+        r = cmd_login_password(b, rest[0], rest[1])
+        print(r)
     elif cmd == 'courses':
         for x in list_courses(b):
             print('%s\t%s/%s\t%s' % (x['name'], x['done'], x['total'], x['url']))

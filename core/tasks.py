@@ -165,13 +165,49 @@ class TaskRunner:
         self._edge_started = False
 
     # ---------- 业务动作（供 GUI 调用） ----------
-    def action_open_site(self, site_home, attach=False, platform="ai"):
+    def action_open_site(self, site_home, attach=False, platform="ai", login=None):
+        """打开平台并（可选）用账号密码登录。
+
+        login={"user":..., "pwd":..., "wait":180}
+        传了 login 就走自动填表；不传就保持原来的「打开页面 / 扫码」行为。
+        扫码要求账号主手机在手边，替别人刷课时账号密码才是可行路径。
+        """
+        user = (login or {}).get("user") or ""
+        password = (login or {}).get("pwd") or ""
+
         if platform == "cx":
+            if user:
+                return self.chaoxing().login_with_password(user, password)
             self.bus.log("学习通使用独立浏览器窗口（有头运行，平台要求不能失焦）")
             return self.chaoxing().login()
+
         br = self.ensure_browser()
         br.goto(site_home)
         br.wait(2500)
+
+        if user:
+            from core.login import login_icve
+            self.bus.log(f"正在用账号 {user} 登录…（自动化登录，仅本机使用）")
+            res = login_icve(
+                br.page, user, password,
+                log=self.bus.log,
+                wait_seconds=int((login or {}).get("wait") or 180),
+                should_stop=self.bus.should_stop,
+                shot=lambda: self.bus.shot(br.shot("login-captcha")),
+            )
+            reason = res.get("reason") or ""
+            if reason == "stopped":
+                return "已停止登录"
+            if not res.get("ok"):
+                raise RuntimeError(f"账号密码登录没成功：{reason}。"
+                                   "可改用「扫码 / 手动登录」，在弹出的窗口里自己登一次")
+            br.wait(1500)
+            br.goto(site_home)          # 登录后回到工作页，避免停在跳转页
+            br.wait(2500)
+            br.shot("open_site")
+            self.bus.log("账号密码登录成功", "ok")
+            return "已登录（账号密码）"
+
         br.shot("open_site")
         self.bus.log(f"已打开：{site_home}")
         return "已打开页面"
@@ -258,6 +294,12 @@ class TaskRunner:
                 return None, 0, f"进入课程「{course_name}」失败"
         else:
             plat = Zjy2(br, self.bus)
+            # v1.7.0：以前 zjy2 不进入课程，直接统计「当前打开的那个页面」，
+            # 换一门课就会读到上一门课的目录（甚至 0 项）。必须按课程名进入。
+            if not plat.enter_course(course_name):
+                if _login_expired(br):
+                    return None, 0, "登录状态已失效（当前停在登录页）"
+                return None, 0, f"进入课程「{course_name}」失败"
         self.bus.progress(30, "统计目录完成度…")
         res = plat.verify()
         if self.bus.should_stop():
@@ -326,12 +368,60 @@ class TaskRunner:
         pct = int(round(done / total * 100))
         return f"完成度 {done}/{total}（{pct}%）"
 
-    def action_brush_course(self, platform="ai", course_name="大学生心理健康"):
+    def action_brush_course(self, platform="ai", course_name="", courses=None):
+        """刷课。course_name="__all__" 时把扫描到的可刷课程逐门刷一遍。
+
+        替别人刷课时往往一账号十几门课，一门门手点不现实；
+        但同时不能瞎刷：只刷扫描结果里标了「可刷」的，无课的直接跳过。
+        """
+        if course_name == "__all__":
+            return self._brush_all_courses(platform, courses or [])
+        if not (course_name or "").strip():
+            return "请先扫描课程并选一门（或用「全部可刷课程」）"
+        return self._brush_summary(self._brush_one(platform, course_name))
+
+    def _brush_all_courses(self, platform, courses):
+        items = [c for c in courses if c.get("brushable") and c.get("name")]
+        if not items:
+            self.bus.log("扫描结果里没有可刷课程，先点「扫描课程」确认", "warn")
+            return "没有可刷课程"
+        total = len(items)
+        okn, failed, skipped = 0, [], 0
+        self.bus.log(f"批量刷课：共 {total} 门可刷课程", "ok")
+        for i, it in enumerate(items, 1):
+            if self.bus.should_stop():
+                self.bus.log(f"已停止：完成 {okn}/{total} 门", "warn")
+                break
+            name = it["name"]
+            self.bus.log(f"=== [{i}/{total}] {name} ===", "ok")
+            self.bus.progress(int((i - 1) / total * 100), f"第 {i}/{total} 门：{name[:24]}")
+            try:
+                res = self._brush_one(platform, name)
+            except Exception as e:
+                failed.append(f"{name}（{str(e)[:40]}）")
+                self.bus.log(f"「{name}」失败：{e}", "error")
+                continue
+            if res.get("aborted"):
+                failed.append(f"{name}（中途中止）")
+            elif res.get("error"):
+                failed.append(f"{name}（{res['error']}）")
+            else:
+                okn += 1
+                if res.get("todo", 0) == 0:
+                    skipped += 1
+        self.bus.progress(100, "批量刷课结束")
+        self.bus.log(f"批量结果：完成 {okn}/{total} 门，失败 {len(failed)} 门", 
+                     "ok" if not failed else "warn")
+        if failed:
+            self.bus.log("失败清单：" + "；".join(failed), "warn")
+        return f"{okn}/{total} 门完成" + (f"，{len(failed)} 门失败" if failed else "")
+
+    def _brush_one(self, platform, course_name):
+        """刷单门课程。返回结果字典（学习通/ai/zjy2 结构一致）。"""
         if platform == "cx":
             self.bus.log("学习通：视频必须 1 倍速播到结尾，平台才认任务点；"
                          "脚本会静音并自动处理失焦/续播弹窗")
-            res = self.chaoxing().brush_course(course_name)
-            return self._brush_summary(res)
+            return self.chaoxing().brush_course(course_name)
         br = self.ensure_browser()
         br.install_guards(prefer_resume=True)
         self.bus.log("刷课期间：播放器自动静音，续播弹窗自动点「继续播放」")
@@ -343,16 +433,25 @@ class TaskRunner:
             plat = AiIcve(br, self.bus)
             if not plat.enter_course(course_name):
                 self.bus.log("进入课程失败", "error")
-                return "进入课程失败"
+                return {"total": 0, "todo": 0, "ok": 0, "aborted": False,
+                        "error": "进入课程失败", "failed": []}
             res = plat.brush_all(only_undone=True, progress_cb=cb)
         else:
             plat = Zjy2(br, self.bus)
+            if not plat.enter_course(course_name):
+                self.bus.log(f"进入课程「{course_name}」失败（课程名不对或页面没加载完）", "error")
+                return {"total": 0, "todo": 0, "ok": 0, "error": "进入课程失败",
+                        "failed": [], "aborted": False}
             res = plat.brush_all(progress_cb=cb)
 
-        return self._brush_summary(res)
+        return res
 
     def _brush_summary(self, res):
         """三个平台共用的刷课结果播报，避免学习通接入后三套重复文案。"""
+        if res.get("error"):
+            # 「进入课程失败」这种不能报成「已全部完成 0/0」，会让人以为刷完了
+            self.bus.log(f"刷课失败：{res['error']}", "error")
+            return f"失败：{res['error']}"
         if res.get("todo", 0) == 0:
             self.bus.progress(100, "无需刷课")
             self.bus.log(f"该课程资源已全部完成（{res.get('done_after')}/{res.get('total')}），无需刷课")
