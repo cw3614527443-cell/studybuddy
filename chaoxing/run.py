@@ -33,15 +33,18 @@ def cmd_status(b):
 
 
 def cmd_login(b, wait_s=180):
-    b.goto('https://v8.chaoxing.com/', settle=3500)
-    # 默认可能是账号登录，切到扫码
+    b.goto('https://v8.chaoxing.com/', settle=6000)
+    # 默认标签会在扫码 / 账密之间自动切换，点一次扫码并给它渲染时间。
+    # 二维码加载失败也没关系：用户可以直接在弹出的窗口里用账号密码登录，
+    # 成功判定看的是 URL 是否离开 v8.chaoxing.com，两种方式都兼容。
     try:
-        b.click(text='扫码登录', settle=2500)
+        b.click(text='扫码登录', settle=3000)
+        b.wait(2500)
     except Exception:
         pass
     shot = b.shot('login-qr.png')
-    print('二维码截图:', shot)
-    print('请用学习通 App 扫码，最多等 %d 秒…' % wait_s)
+    print('登录页截图:', shot)
+    print('请在弹出的浏览器窗口里扫码，或用手机号 / 账号密码登录；最多等 %d 秒…' % wait_s)
     t0 = time.time()
     while time.time() - t0 < wait_s:
         if stopped():
@@ -58,7 +61,14 @@ def cmd_login(b, wait_s=180):
     b.goto(SPACE, settle=4000)
     txt = b.text()[:200].replace('\n', ' ')
     print('登录后页面:', txt[:120])
-    return {'ok': True}
+    try:
+        now = b.js('return location.href;', timeout=15) or ''
+    except Exception:
+        now = ''
+    logged = 'v8.chaoxing.com' not in now
+    if not logged:
+        print('仍在登录页，后面扫描课程会失败；请重新点①并登录', flush=True)
+    return {'ok': True, 'logged_in': logged}
 
 
 def list_courses(b):

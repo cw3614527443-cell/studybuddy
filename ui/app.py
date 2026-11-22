@@ -1,12 +1,16 @@
 """StudyBuddy 主界面。
 
-v1.2.0 重做视觉：自绘圆角卡片 + 左侧导航 + 深色日志面板，并按屏幕 DPI 缩放，
-在 125% / 150% 缩放下文字不再被系统拉伸糊掉。
+v1.6.0 重做设计语言：从「功能列表」改成「按流程做事」。
 
-布局：
-- 左侧 246px 导航栏：品牌、①~⑤ 操作、停止/关闭、说明与版本
-- 右侧内容区：标题与状态、平台卡、参数卡、日志卡、进度与截图
-所有视觉元素由 ui/widgets.py 自绘，不依赖 ttk 系统主题。
+设计原则（真人易用性优先）：
+1. 主内容区就是操作顺序：选平台 → 选课程 → 看进度，不让人猜下一步；
+2. 平台用卡片而不是下拉，域名和能力边界一眼可见，选错的成本前置消除；
+3. 扫描课程是主按钮，课程没扫描时明确显示空态，杜绝默认课程名的假象；
+4. 不适用当前平台的参数直接隐藏，减少无效信息；
+5. 停止按钮跟着进度走，运行中永远在视野里；
+6. 左侧保留 ①~⑥ 快捷入口，但用「快速上手」卡把真实顺序讲清楚。
+
+所有视觉元素由 ui/widgets.py 自绘，按屏幕 DPI 缩放，不依赖 ttk 系统主题。
 """
 import os
 import threading
@@ -26,26 +30,27 @@ class App:
     PLATFORM_INFO = {
         "ai": {
             "host": "ai.icve.com.cn",
-            "desc": "卡片式首页，卡片上显示「观看时长 / 学习次数」。\n"
-                    "刷课＝视频拖到末尾、文档翻到末页；刷时长＝真实播放累计学时。\n"
-                    "个别课程不计学时，点②会自动改读目录完成度。\n"
-                    "刷课时自动静音、续播弹窗自动关；测验/作业需自己作答。",
+            "feature": "卡片式首页，有观看时长统计",
+            "tags": "刷课 · 学时 · 答题",
+            "desc": "刷课＝视频拖到末尾、文档翻到末页；刷时长＝真实播放累计学时。\n"
+                    "个别课程不计学时，点②会自动改读目录完成度。",
         },
         "zjy2": {
             "host": "zjy2.icve.com.cn",
-            "desc": "左侧「章节 → 小节 → 资源」树，资源后带百分比；只支持刷课。\n"
-                    "这个平台没有学时统计，点②读的是目录完成度（已完成 / 总数）。\n"
-                    "网速慢时会先等页面加载完再动手，日志里会显示「继续等…」。\n"
-                    "刷课时自动静音、续播弹窗自动关；测验/作业需自己作答。",
+            "feature": "章节资源树，资源后带百分比",
+            "tags": "刷课 · 进度复核",
+            "desc": "没有学时统计，点②读的是目录完成度（已完成 / 总数）。\n"
+                    "网速慢时会先等页面加载完再动手，日志里会显示「继续等…」。",
         },
         "cx": {
             "host": "v8.chaoxing.com · mooc2",
-            "desc": "学习通：独立有头浏览器窗口，首次要扫二维码；不要最小化窗口。\n"
-                    "视频必须 1 倍速播到结尾平台才认任务点，耗时约等于视频总时长。\n"
-                    "支持扫描课程、读任务点进度、刷视频、大模型自动答题。\n"
-                    "测验答案由软件调用你配置的大模型生成，不需要切出来问答。",
+            "feature": "独立浏览器，视频要真实播完",
+            "tags": "刷课 · 答题 · 有头窗口",
+            "desc": "首次在弹出窗口扫码或账密登录；窗口不要最小化。\n"
+                    "视频必须 1 倍速播到结尾平台才认任务点，耗时≈视频总时长。",
         },
     }
+    PLATFORM_ORDER = (("ai", "AI 优课"), ("zjy2", "zjy2"), ("cx", "学习通"))
 
     def __init__(self, root):
         self.root = root
@@ -92,14 +97,14 @@ class App:
 
     def _build_sidebar(self):
         p = W.s
-        bar = tk.Frame(self.root, bg=W.CARD, width=p(246))
+        bar = tk.Frame(self.root, bg=W.CARD, width=p(238))
         bar.pack(side="left", fill="y")
         bar.pack_propagate(False)
         tk.Frame(bar, bg=W.LINE, width=1).place(relx=1.0, rely=0, relheight=1.0, anchor="ne")
 
-        # 品牌区
+        # 品牌
         brand = tk.Frame(bar, bg=W.CARD)
-        brand.pack(fill="x", padx=p(20), pady=(p(22), p(18)))
+        brand.pack(fill="x", padx=p(18), pady=(p(16), p(12)))
         self._build_logo(brand)
         texts = tk.Frame(brand, bg=W.CARD)
         texts.pack(side="left")
@@ -108,8 +113,19 @@ class App:
         tk.Label(texts, text="智慧职教 · 学习助手", bg=W.CARD, fg=W.TEXT_MUT,
                  font=W.font(8)).pack(anchor="w", pady=(p(2), 0))
 
-        tk.Label(bar, text="操作", bg=W.CARD, fg=W.TEXT_MUT,
-                 font=W.font(8)).pack(anchor="w", padx=p(22), pady=(0, p(6)))
+        # 快速上手：真实操作顺序写在最显眼的位置，避免对着 ①~⑥ 猜流程
+        guide = W.RoundedCanvas(bar, radius=10, fill=W.ACCENT_SOFT, outline="",
+                                line_width=0, pad=(12, 10), height=112)
+        guide.pack(fill="x", padx=p(12), pady=(0, p(12)))
+        tk.Label(guide.body, text="快速上手", bg=W.ACCENT_SOFT, fg=W.ACCENT,
+                 font=W.font(9, "bold")).pack(anchor="w")
+        for line in ("1  选平台 → 看域名", "2  点①登录浏览器",
+                     "3  扫描课程 → 选课", "4  点③刷课 → ②验收"):
+            tk.Label(guide.body, text=line, bg=W.ACCENT_SOFT, fg=W.TEXT_SUB,
+                     font=W.font(8), anchor="w").pack(anchor="w", pady=(p(2), 0))
+
+        tk.Label(bar, text="常用操作", bg=W.CARD, fg=W.TEXT_MUT,
+                 font=W.font(8)).pack(anchor="w", padx=p(18), pady=(0, p(5)))
 
         items = [
             ("open", "启动浏览器 / 登录", 1, self.on_open_site),
@@ -120,44 +136,35 @@ class App:
             ("quiz", "自动答题（大模型）", 6, self.on_quiz),
         ]
         for key, label, num, cmd in items:
-            b = W.NavButton(bar, text=label, number=num, command=cmd, height=42)
-            b.pack(fill="x", padx=p(12), pady=p(2))
+            b = W.NavButton(bar, text=label, number=num, command=cmd, height=38)
+            b.pack(fill="x", padx=p(12), pady=p(1))
             self._nav[key] = b
 
-        W.divider(bar, pady=(14, 10), padx=18)
+        W.divider(bar, pady=(10, 8), padx=14)
 
-        self.btn_stop = W.NavButton(bar, text="停止当前任务", kind="danger",
-                                    command=self.on_stop, height=40)
-        self.btn_stop.pack(fill="x", padx=p(12), pady=p(2))
+        self.btn_stop = W.NavButton(bar, text="■  停止当前任务", kind="danger",
+                                    command=self.on_stop, height=38)
+        self.btn_stop.pack(fill="x", padx=p(12), pady=p(1))
         self.btn_stop.config(state="disabled")
 
         self.btn_close = W.NavButton(bar, text="关闭浏览器", kind="ghost",
-                                     command=self.on_close_browser, height=40)
-        self.btn_close.pack(fill="x", padx=p(12), pady=p(2))
+                                     command=self.on_close_browser, height=34)
+        self.btn_close.pack(fill="x", padx=p(12), pady=p(1))
 
-        # 底部
         bottom = tk.Frame(bar, bg=W.CARD)
-        bottom.pack(side="bottom", fill="x", padx=p(12), pady=(0, p(14)))
+        bottom.pack(side="bottom", fill="x", padx=p(12), pady=(0, p(10)))
         self.btn_settings = W.NavButton(bottom, text="⚙ 大模型设置", kind="link",
-                                        command=self.on_settings, height=30)
+                                        command=self.on_settings, height=28)
         self.btn_settings.pack(fill="x")
-        self.btn_help = W.NavButton(bottom, text="看不懂？功能说明", kind="link",
-                                    command=self.on_help, height=30)
+        self.btn_help = W.NavButton(bottom, text="功能说明", kind="link",
+                                    command=self.on_help, height=28)
         self.btn_help.pack(fill="x")
-        # 版本号兼作入口：点开「关于此软件」看开发信息与更新日志
         self.btn_about = W.NavButton(bottom, text=f"关于此软件 · v{APP_VERSION}",
-                                     kind="link", command=self.on_about, height=30)
+                                     kind="link", command=self.on_about, height=28)
         self.btn_about.pack(fill="x")
-
-        # 侧栏留白太多，用一块淡色提示填空，顺带交代两条容易踩的坑
-        tip = W.RoundedCanvas(bar, radius=10, fill="#F7F8FC", outline="", line_width=0,
-                              pad=(13, 11), height=88)
-        tip.pack(side="bottom", fill="x", padx=p(14), pady=(0, p(8)))
-        tk.Label(tip.body, text="小提示", bg="#F7F8FC", fg=W.TEXT_SUB,
-                 font=W.font(8, "bold")).pack(anchor="w")
-        tk.Label(tip.body, text="关闭浏览器后要重新登录；\n已完成的课时不会回退。",
-                 bg="#F7F8FC", fg=W.TEXT_MUT, font=W.font(8),
-                 justify="left").pack(anchor="w", pady=(p(4), 0))
+        tk.Label(bottom, text="关闭浏览器后要重新登录；已完成的课时不会回退。",
+                 bg=W.CARD, fg=W.TEXT_MUT, font=W.font(8), wraplength=p(212),
+                 justify="left", anchor="w").pack(anchor="w", pady=(p(6), 0))
 
     def _build_logo(self, parent):
         """优先用打包进来的 icon.png，失败则画个方块兜底。"""
@@ -188,92 +195,103 @@ class App:
         content = tk.Frame(self.root, bg=W.BG)
         content.pack(side="left", fill="both", expand=True)
         inner = tk.Frame(content, bg=W.BG)
-        inner.pack(fill="both", expand=True, padx=p(26), pady=(p(20), p(18)))
+        inner.pack(fill="both", expand=True, padx=p(24), pady=(p(16), p(14)))
 
-        # ---- 顶部标题 + 状态 ----
+        # ---- 顶部 ----
         head = tk.Frame(inner, bg=W.BG)
         head.pack(fill="x")
         left = tk.Frame(head, bg=W.BG)
         left.pack(side="left")
         tk.Label(left, text="工作台", bg=W.BG, fg=W.TEXT,
-                 font=W.font(16, "bold")).pack(anchor="w")
-        tk.Label(left, text="选好平台后，点左侧任一操作开始", bg=W.BG, fg=W.TEXT_MUT,
+                 font=W.font(17, "bold")).pack(anchor="w")
+        tk.Label(left, text="按下面三步走，不用记按钮顺序", bg=W.BG, fg=W.TEXT_MUT,
                  font=W.font(9)).pack(anchor="w", pady=(p(3), 0))
         self.chip = W.StatusChip(head, text="就绪")
         self.chip.pack(side="right", pady=(p(4), 0))
 
-        # ---- 平台卡 ----
-        pcard = W.Card(inner, height=196, pad=(18, 14))
-        pcard.pack(fill="x", pady=(p(14), 0))
-        body = pcard.body
-        row = tk.Frame(body, bg=W.CARD)
-        row.pack(fill="x")
-        tk.Label(row, text="学习平台", bg=W.CARD, fg=W.TEXT,
-                 font=W.font(10, "bold")).pack(side="left")
-        tk.Label(row, text="按浏览器地址栏的域名选", bg=W.CARD, fg=W.TEXT_MUT,
-                 font=W.font(8)).pack(side="right", pady=(p(2), 0))
+        # ---- ① 平台：卡片一眼可见域名与能力 ----
+        s1 = tk.Frame(inner, bg=W.BG)
+        s1.pack(fill="x", pady=(p(13), 0))
+        tk.Label(s1, text="①  选择平台", bg=W.BG, fg=W.TEXT,
+                 font=W.font(11, "bold")).pack(side="left")
+        tk.Label(s1, text="照浏览器地址栏的域名选", bg=W.BG, fg=W.TEXT_MUT,
+                 font=W.font(8)).pack(side="right", pady=(p(3), 0))
 
         self.platform_var = tk.StringVar(value="ai")
-        self.seg = W.Segmented(body, options=[("ai", "AI 优课"), ("zjy2", "zjy2"),
-                                              ("cx", "学习通")],
-                               value="ai", command=self._on_platform_change,
-                               width=300, height=36)
-        self.seg.pack(anchor="w", pady=(p(10), p(10)))
-
-        self.host_label = tk.Label(body, text="", bg=W.CARD, fg=W.ACCENT,
-                                   font=W.font(9, "bold"))
-        self.host_label.pack(anchor="w")
-        self.note_label = tk.Label(body, text="", bg=W.CARD, fg=W.TEXT_SUB,
-                                   font=W.font(9), justify="left", anchor="w")
-        self.note_label.pack(anchor="w", pady=(p(3), 0), fill="x")
-
-        # 平台说明随窗口宽度换行
-        pcard.bind("<Configure>",
+        opts = [(key, name, self.PLATFORM_INFO[key]["host"],
+                 self.PLATFORM_INFO[key]["feature"], self.PLATFORM_INFO[key]["tags"])
+                for key, name in self.PLATFORM_ORDER]
+        self.seg = W.PlatformCards(inner, options=opts, value="ai",
+                                   command=self._on_platform_change, height=112)
+        self.seg.pack(fill="x", pady=(p(7), 0))
+        self.note_label = tk.Label(inner, text="", bg=W.BG, fg=W.TEXT_SUB,
+                                   font=W.font(8), justify="left", anchor="w")
+        self.note_label.pack(fill="x", anchor="w", pady=(p(6), 0))
+        inner.bind("<Configure>",
                    lambda e: self.note_label.config(
-                       wraplength=max(p(320), e.width - p(60))), add="+")
-        self._on_platform_change("ai")
+                       wraplength=max(p(400), e.width - p(48))), add="+")
 
-        # ---- 参数卡 ----
-        ccard = W.Card(inner, height=120, pad=(18, 14))
-        ccard.pack(fill="x", pady=(p(12), 0))
-        cb = ccard.body
-        tk.Label(cb, text="任务参数", bg=W.CARD, fg=W.TEXT,
-                 font=W.font(10, "bold")).pack(anchor="w")
+        # ---- ② 课程：扫描是主按钮，空态说清楚 ----
+        s2 = W.Card(inner, height=96, pad=(16, 12))
+        s2.pack(fill="x", pady=(p(12), 0))
+        row = tk.Frame(s2.body, bg=W.CARD)
+        row.pack(fill="x")
+        tk.Label(row, text="②  选择课程", bg=W.CARD, fg=W.TEXT,
+                 font=W.font(11, "bold")).pack(side="left")
+        self.course_hint = tk.Label(row, text="还没扫描", bg=W.CARD,
+                                    fg=W.TEXT_MUT, font=W.font(8))
+        self.course_hint.pack(side="right", pady=(p(3), 0))
 
-        form = tk.Frame(cb, bg=W.CARD)
-        form.pack(fill="x", pady=(p(8), 0))
-        form.columnconfigure(0, weight=1)
-
-        self.course_var = tk.StringVar(value="大学生心理健康")
-        self.hours_var = tk.StringVar(value=str(DEFAULT_TARGET_HOURS))
-        self.maxmin_var = tk.StringVar(value="300")
-        self._courses = []  # 扫描出的课程列表 [{name, brushable, note}]
-
-        # 课程名：可扫描选择的下拉列表（不再手输，避免错字找不到课程）
+        form = tk.Frame(s2.body, bg=W.CARD)
+        form.pack(fill="x", pady=(p(9), 0))
+        self.course_var = tk.StringVar(value="")   # 空态：不伪造一个默认课程
         cf = tk.Frame(form, bg=W.CARD)
-        cf.grid(row=0, column=0, sticky="ew", padx=(0, 0))
-        lbl_row = tk.Frame(cf, bg=W.CARD)
-        lbl_row.pack(fill="x")
-        tk.Label(lbl_row, text="课程名", bg=W.CARD, fg=W.TEXT_MUT,
-                 font=W.font(8)).pack(side="left")
-        self.btn_scan = W.NavButton(lbl_row, text="扫描课程", kind="link",
-                                    command=self.on_scan_courses, height=18)
-        self.btn_scan.pack(side="right")
+        cf.pack(side="left", fill="x", expand=True)
+        self.btn_scan = W.NavButton(cf, text="扫描课程", kind="primary",
+                                    height=38, width=108, command=self.on_scan_courses)
+        self.btn_scan.pack(side="left", padx=(0, p(10)))
         self.course_picker = W.CoursePicker(
             cf, textvariable=self.course_var, on_refresh=self.on_scan_courses,
-            height=38, placeholder="先点右上「扫描课程」")
-        self.course_picker.pack(fill="x", pady=(p(4), 0))
+            height=38, placeholder="点「扫描课程」，再从列表里选")
+        self.course_picker.pack(side="left", fill="x", expand=True)
 
-        self._field(form, 1, "目标时长", self.hours_var, suffix="时", width=104,
-                    padx=(p(14), 0))
-        self._field(form, 2, "最长挂机", self.maxmin_var, suffix="分", width=104,
-                    padx=(p(14), 0))
+        self._params = tk.Frame(form, bg=W.CARD)
+        self._params.pack(side="left", padx=(p(12), 0))
+        self.hours_var = tk.StringVar(value=str(DEFAULT_TARGET_HOURS))
+        self.maxmin_var = tk.StringVar(value="300")
+        self._field(self._params, "目标时长", self.hours_var, "时", 88)
+        self._field(self._params, "最长挂机", self.maxmin_var, "分", 88)
+        self._courses = []
 
-        # ---- 日志卡 ----
-        lcard = W.Card(inner, height=180, pad=(16, 14))
-        lcard.pack(fill="both", expand=True, pady=(p(12), 0))
-        lb = lcard.body
-        lhead = tk.Frame(lb, bg=W.CARD)
+        # ---- ③ 进度与停止：停止按钮跟着进度走 ----
+        s3 = W.Card(inner, height=86, pad=(16, 12))
+        s3.pack(fill="x", pady=(p(10), 0))
+        prow = tk.Frame(s3.body, bg=W.CARD)
+        prow.pack(fill="x")
+        tk.Label(prow, text="③  运行中", bg=W.CARD, fg=W.TEXT,
+                 font=W.font(11, "bold")).pack(side="left")
+        self.btn_stop2 = W.NavButton(prow, text="■ 停止", kind="danger",
+                                     height=30, width=88, command=self.on_stop)
+        self.btn_stop2.pack(side="right")
+        self.btn_stop2.config(state="disabled")
+        self.pct_label = tk.Label(prow, text="0%", bg=W.CARD, fg=W.TEXT_MUT,
+                                  font=W.font(9, "bold"))
+        self.pct_label.pack(side="right", padx=(0, p(12)))
+        self.prog = W.Progress(s3.body, height=10)
+        self.prog.pack(fill="x", pady=(p(8), p(5)))
+        self.prog_var = tk.StringVar(value="空闲中 — 选好平台与课程后点左侧操作")
+        tk.Label(s3.body, textvariable=self.prog_var, bg=W.CARD, fg=W.TEXT_SUB,
+                 font=W.font(9), anchor="w", justify="left").pack(fill="x")
+
+        # 平台说明 / 参数可见性 / 按钮状态：等所有控件建完再应用一次
+        self._on_platform_change("ai")
+
+        # ---- 日志 + 最新画面 ----
+        bottom = tk.Frame(inner, bg=W.BG)
+        bottom.pack(fill="both", expand=True, pady=(p(10), 0))
+        lcard = W.Card(bottom, pad=(14, 12))
+        lcard.pack(side="left", fill="both", expand=True)
+        lhead = tk.Frame(lcard.body, bg=W.CARD)
         lhead.pack(fill="x")
         tk.Label(lhead, text="运行日志", bg=W.CARD, fg=W.TEXT,
                  font=W.font(10, "bold")).pack(side="left")
@@ -281,68 +299,41 @@ class App:
                  font=W.font(8)).pack(side="left", padx=(p(8), 0), pady=(p(2), 0))
         W.NavButton(lhead, text="清空", kind="mini", command=self._clear_log,
                     height=26, radius=8, width=54).pack(side="right")
-
-        dark = W.RoundedCanvas(lb, radius=10, fill=W.LOG_BG, outline="", line_width=0,
-                               pad=(14, 10), height=140)
-        dark.pack(fill="both", expand=True, pady=(p(10), 0))
+        dark = W.RoundedCanvas(lcard.body, radius=10, fill=W.LOG_BG, outline="",
+                               line_width=0, pad=(13, 10))
+        dark.pack(fill="both", expand=True, pady=(p(9), 0))
         self.log = tk.Text(dark.body, bg=W.LOG_BG, fg=W.LOG_TEXT, bd=0, relief="flat",
                            highlightthickness=0, font=("Consolas", 9), wrap="word",
                            padx=0, pady=0, spacing1=2, spacing3=2, state="disabled",
                            insertbackground="#FFFFFF", selectbackground="#2A3A5A",
                            selectforeground="#FFFFFF")
         self.log.pack(fill="both", expand=True)
-        self.log.tag_config("time", foreground="#5D6B85")
-        self.log.tag_config("info", foreground=W.LOG_TEXT)
-        self.log.tag_config("warn", foreground="#FBBF24")
-        self.log.tag_config("error", foreground="#F87171")
-        self.log.tag_config("ok", foreground="#4ADE80")
-        self.log.tag_config("accent", foreground="#93B4FF")
-        self.log.tag_config("muted", foreground="#6B7A93")
-        self.log.tag_config("muted", foreground="#6B7A93")
+        for tag, color in (("time", "#6B7A93"), ("info", W.LOG_TEXT),
+                           ("warn", "#FBBF24"), ("error", "#F87171"),
+                           ("ok", "#4ADE80"), ("accent", "#93B4FF"),
+                           ("muted", "#6B7A93")):
+            self.log.tag_config(tag, foreground=color)
 
-        # ---- 底部：进度 + 截图 ----
-        foot = tk.Frame(inner, bg=W.BG, height=p(124))
-        foot.pack(fill="x", pady=(p(14), 0))
-        foot.pack_propagate(False)
-
-        pbox = tk.Frame(foot, bg=W.BG)
-        pbox.pack(side="left", fill="both", expand=True, pady=(p(6), 0))
-        prow = tk.Frame(pbox, bg=W.BG)
-        prow.pack(fill="x")
-        tk.Label(prow, text="任务进度", bg=W.BG, fg=W.TEXT_SUB,
-                 font=W.font(9)).pack(side="left")
-        self.pct_label = tk.Label(prow, text="0%", bg=W.BG, fg=W.TEXT_MUT,
-                                  font=W.font(9, "bold"))
-        self.pct_label.pack(side="right")
-        self.prog = W.Progress(pbox, height=8)
-        self.prog.pack(fill="x", pady=(p(9), p(9)))
-        self.prog_var = tk.StringVar(value="空闲中")
-        tk.Label(pbox, textvariable=self.prog_var, bg=W.BG, fg=W.TEXT_MUT,
-                 font=W.font(9), justify="left", anchor="w").pack(fill="x")
-
-        sbox = tk.Frame(foot, bg=W.BG)
-        sbox.pack(side="right", padx=(p(20), 0), pady=(p(6), 0))
-        tk.Label(sbox, text="最新画面", bg=W.BG, fg=W.TEXT_MUT,
-                 font=W.font(8)).pack(anchor="w", pady=(0, p(5)))
-        self.shot_card = W.ShotCard(sbox, width=196, height=96)
+        scard = W.Card(bottom, width=200, pad=(12, 10))
+        scard.pack(side="right", fill="y", padx=(p(10), 0))
+        tk.Label(scard.body, text="最新画面", bg=W.CARD, fg=W.TEXT_SUB,
+                 font=W.font(9, "bold")).pack(anchor="w")
+        self.shot_hint = tk.Label(scard.body, text="扫码 / 登录时看这里",
+                                  bg=W.CARD, fg=W.TEXT_MUT, font=W.font(8))
+        self.shot_hint.pack(anchor="w", pady=(p(2), p(6)))
+        self.shot_card = W.ShotCard(scard.body, width=176, height=104)
         self.shot_card.pack()
 
-    def _field(self, parent, col, label, var, suffix="", width=0, padx=(0, 0)):
-        """表单列：小标题 + 圆角输入框。col=0 那列自动占满剩余宽度。"""
+    def _field(self, parent, label, var, suffix="", width=88):
+        """紧凑表单列：小标题 + 圆角输入框。"""
         p = W.s
         f = tk.Frame(parent, bg=W.CARD)
-        if col == 0:
-            f.grid(row=0, column=col, sticky="ew", padx=padx)
-        else:
-            f.grid(row=0, column=col, sticky="w", padx=padx)
+        f.pack(side="left")
         tk.Label(f, text=label, bg=W.CARD, fg=W.TEXT_MUT,
-                 font=W.font(8)).pack(anchor="w", pady=(0, p(4)))
+                 font=W.font(8)).pack(anchor="w", pady=(0, p(3)))
         e = W.RoundEntry(f, textvariable=var, suffix=suffix,
-                         width=width or 120, height=38)
-        if width:
-            e.pack()
-        else:
-            e.pack(fill="x")
+                         width=width, height=34)
+        e.pack()
         return e
 
     # ------------------------------------------------------------ 事件循环
@@ -409,27 +400,49 @@ class App:
         pass
 
     def _on_platform_change(self, key=None):
-        """切换平台：刷新说明、同步分段控件、按平台禁用不适用功能。"""
+        """切换平台：刷新说明、隐藏不适用参数、清空别的平台的课程列表。"""
         if key:
             self.platform_var.set(key)
-            if self.seg.get() != key:          # 从代码切换时同步分段控件
+            if self.seg.get() != key:          # 从代码切换时同步平台卡
                 self.seg.set(key)
-        info = self.PLATFORM_INFO.get(self.platform_var.get(), {})
-        self.host_label.config(text=info.get("host", ""))
-        self.note_label.config(text=info.get("desc", ""))
-        # 课程列表按平台区分：切换平台时清空旧结果，提示重新扫描
-        if getattr(self, "_courses_platform", None) != self.platform_var.get():
+        plat = self.platform_var.get()
+        info = self.PLATFORM_INFO.get(plat, {})
+        self.note_label.config(text="注意：" + info.get("desc", ""))
+
+        # 只有 AI 优课有单独的「刷观看时长」入口；其他平台藏掉免得误填
+        if plat == "ai":
+            self._params.pack(side="left", padx=(W.s(12), 0))
+        else:
+            self._params.pack_forget()
+
+        # 课程列表按平台区分：换平台必须重新扫描，不能拿旧的课程名去跑
+        if getattr(self, "_courses_platform", None) != plat:
             self._courses = []
             self._courses_platform = None
+            self.course_var.set("")
             picker = getattr(self, "course_picker", None)
             if picker is not None:
                 picker.set_items([])
+        self._refresh_course_hint()
+
         if not self.runner.is_running():
-            plat = self.platform_var.get()
             ai = plat == "ai"
             # zjy2 没适配答题；学习通视频必须播到结尾，没有单独的刷时长入口
             self._nav["watch"].config(state="normal" if ai else "disabled")
             self._nav["quiz"].config(state="normal" if plat in ("ai", "cx") else "disabled")
+
+    def _refresh_course_hint(self):
+        """课程区右侧实时说明：让用户知道现在选的是哪批扫描结果。"""
+        if not hasattr(self, "course_hint"):
+            return
+        plat = getattr(self, "platform_var", None)
+        plat = plat.get() if plat else ""
+        if getattr(self, "_courses_platform", None) != plat or not self._courses:
+            self.course_hint.config(text="还没扫描", fg=W.TEXT_MUT)
+            return
+        n = len(self._courses)
+        brush = sum(1 for x in self._courses if x.get("brushable"))
+        self.course_hint.config(text=f"识别 {n} 门 · 可刷 {brush}", fg=W.GREEN)
 
     def _on_courses(self, data):
         """后台扫描完课程列表，回填下拉框。"""
@@ -443,11 +456,13 @@ class App:
             first = next((x for x in items if x.get("brushable")), items[0])
             self.course_var.set(first["name"])
             self.course_picker._render()
+        self._refresh_course_hint()
 
     def on_scan_courses(self):
         if self.runner.is_running():
             return
         platform = self.platform_var.get()
+        self.course_hint.config(text="扫描中…", fg=W.ACCENT)
         self._run(lambda: self.runner.action_list_courses(platform), nav=None)
         self._set_status("扫描课程中…", "run")
 
@@ -566,6 +581,7 @@ class App:
         self.btn_scan.config(state=state)
         self.course_picker.config(state=state)
         self.btn_stop.config(state="normal" if busy else "disabled")
+        self.btn_stop2.config(state="normal" if busy else "disabled")
         if not busy:
             for b in self._nav.values():
                 b.set_selected(False)

@@ -339,6 +339,91 @@ class Segmented(RoundedCanvas):
                              font=font(9, "bold" if active else "normal"))
 
 
+class PlatformCards(tk.Frame):
+    """平台选择卡：三张横排卡片，一眼看清域名、特点和能力边界。
+
+    对外接口与 Segmented 完全一致（get / set / command），
+    这样切换控件时上层逻辑不用改。
+
+    options: [(key, 名称, 域名, 一句话特点, 能力标签), ...]
+    """
+
+    def __init__(self, master, options, value=None, command=None, height=112, **kw):
+        super().__init__(master, bg=_bg_of(master), **kw)
+        self._opts = list(options)
+        self._value = value or (self._opts[0][0] if self._opts else None)
+        self._command = command
+        self._cards = []
+        for opt in self._opts:
+            # width=1 让 pack(expand=True) 真正均分父容器宽度；
+            # 不写的话 Canvas 用默认 378px 请求宽度，三张卡会把窗口撑出去。
+            c = RoundedCanvas(self, radius=12, fill=CARD, outline=LINE, line_width=1,
+                              with_body=False, height=height, width=1)
+            c.pack(side="left", fill="both", expand=True, padx=(0, s(10)))
+            c._opt = opt
+            c._hover = False
+            c.bind("<Button-1>", lambda e, k=opt[0]: self._pick(k))
+            c.bind("<Enter>", lambda e, cc=c: self._hover_card(cc, True))
+            c.bind("<Leave>", lambda e, cc=c: self._hover_card(cc, False))
+            c.bind("<Configure>", lambda e, cc=c: self._draw(cc))
+            self._cards.append(c)
+        if self._cards:
+            self._cards[-1].pack_configure(padx=(0, 0))
+
+    def get(self):
+        return self._value
+
+    def set(self, value):
+        # 与 Segmented 语义一致：代码同步不触发 command，只有用户点击才触发
+        if value != self._value:
+            self._value = value
+            self._draw_all()
+
+    def _pick(self, key):
+        if key == self._value:
+            return
+        self._value = key
+        self._draw_all()
+        if self._command:
+            self._command(key)
+
+    def _hover_card(self, card, on):
+        card._hover = on
+        card.configure(cursor="hand2")
+        self._draw(card)
+
+    def _draw_all(self):
+        for c in self._cards:
+            self._draw(c)
+
+    def _draw(self, c):
+        w, h = c.winfo_width(), c.winfo_height()
+        if w <= 4 or h <= 4:
+            return
+        key, name, host, feature, tags = c._opt
+        active = key == self._value
+        c.delete("all")
+        fill = ACCENT_SOFT if active else (NAV_HOVER if c._hover else CARD)
+        outline = ACCENT if active else (LINE_STRONG if c._hover else LINE)
+        c.create_polygon(rounded_points(0.5, 0.5, w - 0.5, h - 0.5, s(12)),
+                         fill=fill, outline=outline, width=1)
+        # 顶部小圆点：选中实心，未选空心
+        cx, cy, r = s(13), s(16), s(4)
+        c.create_oval(cx - r, cy - r, cx + r, cy + r,
+                      fill=ACCENT if active else "#FFFFFF", outline=ACCENT, width=1)
+        c.create_text(cx + s(12), cy, text=name, anchor="w",
+                      fill=TEXT if active else TEXT_SUB, font=font(10, "bold"))
+        c.create_text(s(12), s(38), text=host, anchor="w",
+                      fill=ACCENT if active else TEXT_MUT, font=font(8))
+        # 特点两行以内
+        c.create_text(s(12), s(60), text=feature, anchor="w",
+                      fill=TEXT_SUB, font=font(8))
+        # 能力标签
+        if tags:
+            c.create_text(s(12), h - s(13), text=tags, anchor="w",
+                          fill=GREEN if active else TEXT_MUT, font=font(8))
+
+
 class RoundEntry(RoundedCanvas):
     """圆角输入框：画布画外框，内部放原生 Entry。"""
 

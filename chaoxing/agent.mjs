@@ -219,7 +219,9 @@ async function handle(cmd) {
 
 try {
   await page.goto('https://v8.chaoxing.com/', { waitUntil: 'domcontentloaded', timeout: 60000 });
-  await sleep(3500);
+  // 登录页默认标签会异步切换（扫码/账密），给足渲染时间再拍首帧，
+  // 否则界面「最新画面」里会出现空白二维码框。
+  await sleep(6000);
   await page.screenshot({ path: path.join(SHOTS, '01-login.png'), type: 'png' });
   writeJson('state.json', { stage: 'qr-ready', url: page.url(), at: new Date().toISOString() });
   console.log('QR READY', page.url());

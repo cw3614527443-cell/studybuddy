@@ -41,12 +41,16 @@ def suite_dir():
 
 
 def _playwright_root():
+    # 打包后必须优先用 _MEIPASS 里的 driver：PyInstaller 的模块 __file__ 有时
+    # 指向解释器安装目录，那会导致 node.exe / index.mjs 找不到（用户机上没装 Python）。
+    base = getattr(sys, "_MEIPASS", None)
+    if base:
+        return os.path.join(base, "playwright")
     try:
         import playwright
         return os.path.dirname(os.path.abspath(playwright.__file__))
     except Exception:
-        base = getattr(sys, "_MEIPASS", None)
-        return os.path.join(base, "playwright") if base else ""
+        return ""
 
 
 def _node_executable():
@@ -215,6 +219,10 @@ class ChaoxingSuite:
         self.root = os.path.join(USERDATA_DIR, "chaoxing")
         for d in ("profile", "io", "shots"):
             os.makedirs(os.path.join(self.root, d), exist_ok=True)
+        # 套件里 video.main() / exam.main() 这些入口会在内部无参 new Browser()，
+        # 只认环境变量或套件默认目录。必须让它们和桥接层用同一个会话目录，
+        # 否则 cmd.json 会写到另一处、永远等不到 agent 的回包（表现为卡死超时）。
+        os.environ["BROWSER_ROOT"] = self.root
         self.proc = None
         self._pump = None
         self._modules = None
@@ -367,7 +375,10 @@ class ChaoxingSuite:
         b = self.browser()
         res = self._call(self.modules()["run"].cmd_login, b, wait_s=wait_seconds)
         if isinstance(res, dict) and res.get("stopped"):
-            return "已停止等待扫码"
+            return "已停止等待登录"
+        if isinstance(res, dict) and res.get("logged_in") is False:
+            raise RuntimeError("看起来还没登录成功（仍停在登录页）。"
+                               "请重新点「① 启动浏览器 / 登录」，在弹出窗口里扫码或用账号密码登录")
         return "学习通已登录"
 
     def list_courses(self):
