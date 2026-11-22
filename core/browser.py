@@ -738,12 +738,26 @@ class Browser:
 
         v1.4.2：读进度/复核时如果掉登录，页面既没有「观看时长」也没有课程卡片，
         以前会被当成「这门课不计学时」「目录里没读到资源」，让人往错的方向排查。
+
+        v1.7.1：只看 URL 会误判。zjy2 是 SPA，身份校验走 sso 的那一瞬间
+        `page.url` 已经是 sso，但 DOM 还是学习空间；若此时正好读进度/扫描，
+        就会被判成「登录失效」，实际登录是好的。所以 URL 命中登录页时，
+        再确认页面上有没有平台内容。
         """
         try:
             u = (self.page.url or "").lower()
         except Exception:
             u = ""
-        if "sso.icve.com.cn" in u or "auth_v2" in u or "/login" in u:
+        if "sso.icve.com.cn" in u or "auth_v2" in u:
+            try:
+                t = self.text()[:800]
+            except Exception:
+                t = ""
+            if any(k in t for k in ("学习空间", "我的课程", "我的课堂", "个人中心",
+                                    "全部课程", "加入班级")):
+                return False
+            return True
+        if "/login" in u:
             return True
         try:
             return "欢迎登录" in self.text()[:400]

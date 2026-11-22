@@ -66,7 +66,21 @@ def _target(b):
     """找到装有目录的页面/框架：优先课程目录页 iframe，其次单章节学习页主文档。"""
     b.locate_course()
     frame = b.frame_of(CATALOG_FRAME)
-    return frame  # None 表示读主文档
+    if frame:
+        return frame
+    # 主文档里已经有目录节点 → 当前就在单章节学习页，直接读主文档
+    try:
+        if b.js('return document.querySelectorAll(\'[id^="cur"]\').length > 0'):
+            return None
+    except Exception:
+        pass
+    # 新版课程空间默认停在「任务」标签，章节树要点一下左侧「章节」才加载。
+    # 不点这一步的后果是 items 为空：刷课「目标 0 个」，明明没刷却说已全部完成。
+    try:
+        b.open_chapter()
+    except Exception:
+        pass
+    return b.frame_of(CATALOG_FRAME)
 
 
 def parse(browser=None, save=True):
@@ -77,18 +91,28 @@ def parse(browser=None, save=True):
     items = data['items']
 
     progress = None
+    cid = ''
+    try:
+        cid = b.course_id() or ''
+    except Exception:
+        cid = ''
     m = re.search(r'(\d+)\s*/\s*(\d+)', data.get('head') or '')
     if m:
-        progress = {'done': int(m.group(1)), 'total': int(m.group(2)), 'text': data['head']}
+        progress = {'done': int(m.group(1)), 'total': int(m.group(2)),
+                    'text': data['head'], 'cid': cid}
         with open(os.path.join(b.io, 'progress.json'), 'w', encoding='utf-8') as f:
             json.dump(progress, f, ensure_ascii=False)
     else:
-        # 单章节页没有「已完成任务点: x/y」表头，沿用上次进度（progress.json 只在有表头时更新）
+        # 单章节页没有「已完成任务点: x/y」表头，沿用上次进度（progress.json 只在有表头时更新）。
+        # 必须校验 cid：否则换课程后会读到上一门课的 134/134，
+        # 于是「数据恢复 0/31」被显示成「课程进度：134/134 没有待完成条目」。
         pj = os.path.join(b.io, 'progress.json')
         if os.path.exists(pj):
             try:
                 with open(pj, encoding='utf-8') as f:
                     progress = json.load(f)
+                if progress.get('cid') and cid and progress['cid'] != cid:
+                    progress = None
             except Exception:
                 progress = None
 

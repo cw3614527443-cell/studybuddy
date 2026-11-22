@@ -69,10 +69,38 @@ const ctx = await chromium.launchPersistentContext(PROFILE, {
   ],
 });
 
+// 登录会话单独存一份 cookie 快照。
+// Chromium 的 profile 只在浏览器**正常退出**时才把 cookie 写进 SQLite；
+// 上一轮真机测试里，登录成功后命令行进程直接退出（管道断开）把浏览器一起带走了，
+// 结果 profile 里只剩 v8 的游客 SESSIONID，扫描课程时又退回登录页——
+// 明明刚登录成功却要再扫一次码。所以每成功登录一次就主动写快照，启动时补回去。
+// 注意别叫 session.json：run.py 的「课程会话（courseUrl）」已经占用了这个文件名，
+// 两个东西同名会互相覆盖——cookie 快照被课程会话盖掉，下次启动就当没登录过。
+const SESSION = path.join(IO, 'auth.json');
+
 let page = ctx.pages()[0] || (await ctx.newPage());
 let quitting = false;
 const pages = () => ctx.pages();
 const pick = (i) => (Number.isInteger(i) && pages()[i] ? pages()[i] : page);
+
+try {
+  if (fs.existsSync(SESSION)) {
+    const st = JSON.parse(fs.readFileSync(SESSION, 'utf8'));
+    if (Array.isArray(st.cookies) && st.cookies.length) {
+      await ctx.addCookies(st.cookies);
+      console.log('SESSION RESTORED', st.cookies.length);
+    }
+  }
+} catch (e) {
+  console.log('SESSION RESTORE FAILED', String(e));
+}
+
+async function saveSession() {
+  const st = await ctx.storageState();
+  const cookies = (st.cookies || []).filter((c) => /chaoxing\.com$/.test(c.domain) || /chaoxing\.com$/.test(String(c.domain).replace(/^\./, '')));
+  writeJson('auth.json', { at: new Date().toISOString(), cookies });
+  return cookies.length;
+}
 
 async function cdpEval(target, expression) {
   const cdp = await ctx.newCDPSession(target);
@@ -208,9 +236,12 @@ async function handle(cmd) {
       await target.close();
       page = pages()[0];
       return { ok: true };
+    case 'save-state':
+      return { count: await saveSession() };
     case 'quit':
       // StudyBuddy 退出时用：先回执，再优雅关浏览器，让 cookie 落盘。
       quitting = true;
+      await saveSession().catch(() => {});
       return { ok: true };
     default:
       throw new Error('unknown cmd: ' + cmd.type);
@@ -218,21 +249,37 @@ async function handle(cmd) {
 }
 
 try {
-  await page.goto('https://v8.chaoxing.com/', { waitUntil: 'domcontentloaded', timeout: 60000 });
+  // 登录页本身（v8）在带着有效 cookie 时也不会跳走，URL 一直是 v8，
+  // 所以有没有登录过不能看 v8，得直接去个人空间探一下。
+  const hasAuth = fs.existsSync(SESSION);
+  const startUrl = hasAuth ? 'https://i.chaoxing.com/base' : 'https://v8.chaoxing.com/';
+  await page.goto(startUrl, { waitUntil: 'domcontentloaded', timeout: 60000 });
   // 登录页默认标签会异步切换（扫码/账密），给足渲染时间再拍首帧，
   // 否则界面「最新画面」里会出现空白二维码框。
   await sleep(6000);
-  await page.screenshot({ path: path.join(SHOTS, '01-login.png'), type: 'png' });
-  writeJson('state.json', { stage: 'qr-ready', url: page.url(), at: new Date().toISOString() });
-  console.log('QR READY', page.url());
+  const u = page.url();
+  const stillLogin = /passport2\.chaoxing\.com|v8\.chaoxing\.com\/?($|\?)/i.test(u);
+  if (stillLogin) {
+    await page.screenshot({ path: path.join(SHOTS, '01-login.png'), type: 'png' });
+  }
+  writeJson('state.json', {
+    stage: stillLogin ? 'qr-ready' : 'logged-in',
+    url: u,
+    at: new Date().toISOString(),
+  });
+  console.log(stillLogin ? 'QR READY' : 'LOGGED IN', u);
 } catch (e) {
   writeJson('state.json', { stage: 'nav-error', error: String(e) });
   console.log('NAV ERROR', String(e));
 }
 
 const done = new Set();
+// 轮询间隔 600ms → 80ms：翻页类任务每页一次指令，600ms 的取指令延迟等于
+// 每页白等 0.6 秒（一门课几十页文档就多花十几分钟）。文件只有几百字节，
+// 12 次/秒的读取开销可以忽略。任务空闲时也不会白跑：没新 id 就直接 continue。
+const IDLE_POLL = 80;
 while (true) {
-  await sleep(600);
+  await sleep(IDLE_POLL);
   let cmd;
   try {
     cmd = JSON.parse(fs.readFileSync(path.join(IO, 'cmd.json'), 'utf8'));

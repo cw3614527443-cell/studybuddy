@@ -151,7 +151,7 @@ def login_icve(page, user, password, log=None, wait_seconds=180,
             log(msg, level)
 
     if not is_login_url(page.url):
-        emit("当前已是登录状态，不需要再登录")
+        emit(f"当前没有停在登录页（{(page.url or '')[:70]}），不需要再登录")
         return {"ok": True, "reason": "already"}
 
     # 1) 切到「账号密码登录」标签。页面默认停在扫码页，且会异步切回，

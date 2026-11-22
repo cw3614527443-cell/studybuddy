@@ -52,7 +52,7 @@ def main():
 
         plat.expand_all()
         items = plat.list_resources()
-        vids = [x for x in items if x["type"] == "video"]
+        vids = [x for x in items if x["kind"] == "video"]
         print(f"[3] 资源 {len(items)} 项，其中视频 {len(vids)} 项，"
               f"已完成 {sum(1 for x in items if x['done'])} 项")
         if not vids:

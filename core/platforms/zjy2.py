@@ -207,22 +207,75 @@ class Zjy2:
         return self.wait_ready()
 
     # ---------- 课程列表（v1.4.4） ----------
-    def list_course_names(self, timeout=15):
-        """从「我的课程」页枚举课程名。卡片是 .course_item，课程名在 .course_name。"""
+    _CARDS_JS = """() => [...document.querySelectorAll('.course_item .course_name, .course_name')]
+                    .map(e => (e.textContent || '').trim())
+                    .filter(t => t && t.length < 60)"""
+
+    def _page_numbers(self):
+        """课程列表的页码（.el-pager li）。一页放 9 门，12 门就会被拆成两页。"""
+        try:
+            nums = self.p.evaluate(
+                """() => [...document.querySelectorAll('.el-pager li')]
+                    .map(e => (e.innerText || '').trim())
+                    .filter(t => /^\\d+$/.test(t))"""
+            )
+            return sorted({int(x) for x in nums})
+        except Exception:
+            return []
+
+    def _goto_list_page(self, no):
+        """切到第 no 页课程列表（1 起）。"""
+        try:
+            self.p.evaluate(
+                """(no) => {
+                    const li = [...document.querySelectorAll('.el-pager li')]
+                        .find(e => (e.innerText || '').trim() === String(no));
+                    if (li) li.click();
+                }""", no)
+        except Exception:
+            return False
+        for _ in range(12):
+            self.br.wait(500)
+            try:
+                if self.p.locator(".course_item").count() > 0:
+                    return True
+            except Exception:
+                pass
+        return False
+
+    def list_course_names(self, timeout=25):
+        """从「我的课程」页枚举课程名。卡片是 .course_item，课程名在 .course_name。
+
+        v1.7.1：两个坑一起修。
+        1) 以前只等 15 秒且「读不到就立刻问 on_login_page」。zjy2 打开课程页
+           要过一次 sso 身份校验（URL 会短暂变成 sso），那一瞬间既没有卡片、
+           URL 又像登录页，于是被误判成「登录失效」——账号明明登进去了却让
+           用户重新扫码。现在等满超时再判定。
+        2) 列表是分页的（一页 9 门）。课程多的账号只看第一页会漏课，
+           漏掉的课永远刷不到。现在按页码把每页都读一遍。
+        """
         self.br.goto(ZJY2_COURSES)
+        self.p = self.br.page
+        self.br.wait(1200)
         deadline = time.time() + timeout
         names = []
         while time.time() < deadline:
-            names = self.p.evaluate(
-                """() => [...document.querySelectorAll('.course_item .course_name, .course_name')]
-                    .map(e => (e.textContent || '').trim())
-                    .filter(t => t && t.length < 60)"""
-            )
+            names = self.p.evaluate(self._CARDS_JS)
             if names:
                 break
-            if self.br.on_login_page():
-                return None
-            self.br.wait(1000)
+            self.br.wait(900)
+        if not names:
+            # 真的读不到时才区分「没登录」和「页面没渲染完」
+            return None if self.br.on_login_page() else []
+
+        pages = self._page_numbers() or [1]
+        for no in pages[1:]:
+            if self._goto_list_page(no):
+                names += self.p.evaluate(self._CARDS_JS)
+        # 读完把列表翻回第一页，后面点课程时从第一页开始找
+        if len(pages) > 1:
+            self._goto_list_page(1)
+
         seen, out = set(), []
         for n in names:
             if n not in seen:
@@ -230,30 +283,48 @@ class Zjy2:
                 out.append(n)
         return out
 
-    def enter_course(self, course_name, timeout=14):
-        """从「我的课程」页点某门课的「学习」，进入教学内容页。"""
+    def _click_course(self, course_name):
+        return self.p.evaluate(
+            """(name) => {
+                const items = [...document.querySelectorAll('.course_item')];
+                const it = items.find(x => ((x.querySelector('.course_name')||{}).textContent||'').trim() === name);
+                if (!it) return false;
+                const btn = it.querySelector('.course_btn') || it;
+                btn.click(); return true;
+            }""",
+            course_name,
+        )
+
+    def enter_course(self, course_name, timeout=18):
+        """从「我的课程」页点某门课的「学习」，进入教学内容页。
+
+        v1.7.1：课程可能在第 2 页。以前只在当前页找，翻页的课永远进不去，
+        刷课就会报「进入课程失败」。现在逐页找。
+        """
         if "/study/v2/course" not in self.br.current_url() or "spoccourseIndex" in self.br.current_url():
             self.br.goto(ZJY2_COURSES)
             self.br.wait(2000)
+            self.p = self.br.page
         deadline = time.time() + timeout
         while time.time() < deadline:
-            ok = self.p.evaluate(
-                """(name) => {
-                    const items = [...document.querySelectorAll('.course_item')];
-                    const it = items.find(x => ((x.querySelector('.course_name')||{}).textContent||'').trim() === name);
-                    if (!it) return false;
-                    const btn = it.querySelector('.course_btn') || it;
-                    btn.click(); return true;
-                }""",
-                course_name,
-            )
-            if ok:
-                break
-            self.br.wait(1000)
-        else:
-            return False
-        self.br.wait(2500)
-        return "spoccourseIndex" in self.br.current_url()
+            try:
+                if self._click_course(course_name):
+                    self.br.wait(2500)
+                    return "spoccourseIndex" in self.br.current_url()
+            except Exception:
+                pass
+            self.br.wait(800)
+        # 当前页没有：按页码翻一圈再找（第 2 页的课以前永远进不去）
+        for no in self._page_numbers():
+            if not self._goto_list_page(no):
+                continue
+            try:
+                if self._click_course(course_name):
+                    self.br.wait(2500)
+                    return "spoccourseIndex" in self.br.current_url()
+            except Exception:
+                pass
+        return False
 
     def probe_resources_fast(self, wait_ms=6000):
         """快速判断当前课程页有无可刷资源（不跑 wait_ready 的 80 秒长等）。
@@ -343,17 +414,17 @@ class Zjy2:
         - 进度文本除了百分比，还要认「已学完 / 已完成」这种没有数字的写法，
           否则已完成项会被当成待刷（v1.2.2 之前的坑）；
         - 没有 .ziProgress 但有完成勾的，也算 100%。
+
+        v1.7.1：任务节点下面挂的视频是 `.fItem[id]`，不是 `.fwenjianjia`。
+        以前只扫 `.fwenjianjia`，于是「任务 8.5」这种父节点被当成一个资源
+        （进度取的是子项聚合值 95%），点它只会展开、不会播放，最后报
+        「没出现播放器或文档」跳过——而真正差 5% 的那个 mp4 永远刷不到。
+        现在把 `.fItem[id]` 也当资源，父节点有子项时不收录。
         """
         raw = self.p.evaluate(
             """() => {
                 const out = [], seen = new Set();
-                for (const f of document.querySelectorAll('.fwenjianjia')) {
-                    if (!f.id || seen.has(f.id)) continue;
-                    if (f.querySelector('.fwenjianjia')) continue;   // 不是叶子
-                    const nm = f.querySelector('.name');
-                    if (!nm) continue;
-                    const name = (nm.innerText || '').trim();
-                    if (!name) continue;
+                const readProg = (f) => {
                     const pr = f.querySelector('.ziProgress');
                     const prog = pr ? (pr.innerText || '').trim() : '';
                     const m = prog.match(/(\\d+)\\s*%/);
@@ -367,8 +438,26 @@ class Zjy2:
                     } else if (!prog && f.querySelector('.checkmark.wc')) {
                         pct = 100;
                     }
+                    return {prog, pct};
+                };
+                const push = (f) => {
+                    if (!f.id || seen.has(f.id)) return;
+                    const nm = f.querySelector('.name');
+                    if (!nm) return;
+                    const name = (nm.innerText || '').trim();
+                    if (!name) return;
+                    const {prog, pct} = readProg(f);
                     seen.add(f.id);
                     out.push({id: f.id, name, prog, pct});
+                };
+                // 1) 任务节点下真正的资源文件（视频/文档/图片）
+                for (const f of document.querySelectorAll('.fItem[id]')) push(f);
+                // 2) 独立的叶子任务节点
+                for (const f of document.querySelectorAll('.fwenjianjia')) {
+                    if (!f.id || seen.has(f.id)) continue;
+                    if (f.querySelector('.fwenjianjia')) continue;   // 还有子任务
+                    if (f.querySelector('.fItem[id]')) continue;     // 还有子资源
+                    push(f);
                 }
                 return out;
             }"""

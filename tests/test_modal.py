@@ -44,8 +44,8 @@ def main():
             return 2
         plat.expand_all()
         items = plat.list_resources()
-        vids = [x for x in items if x["type"] == "video"]
-        docs = [x for x in items if x["type"] == "doc"]
+        vids = [x for x in items if x["kind"] == "video"]
+        docs = [x for x in items if x["kind"] == "doc"]
         if len(vids) < 1:
             print("    ✗ 无视频节点")
             return 2

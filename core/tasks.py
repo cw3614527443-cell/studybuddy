@@ -165,6 +165,14 @@ class TaskRunner:
         self._edge_started = False
 
     # ---------- 业务动作（供 GUI 调用） ----------
+    @staticmethod
+    def _login_entry(platform, site_home):
+        """账号密码登录的落地页：必须是「未登录就会跳统一认证」的页面。
+
+        zjy2 用「我的课程」，AI 优课用自己的个人空间首页（本来就要求登录）。
+        """
+        return {"zjy2": "https://zjy2.icve.com.cn/study/v2/course"}.get(platform, site_home)
+
     def action_open_site(self, site_home, attach=False, platform="ai", login=None):
         """打开平台并（可选）用账号密码登录。
 
@@ -177,12 +185,19 @@ class TaskRunner:
 
         if platform == "cx":
             if user:
-                return self.chaoxing().login_with_password(user, password)
+                # 滑块要人工拖，等待时间必须可以由调用方给（默认 3 分钟太短，
+                # 账号主不在电脑前时很容易超时）。
+                return self.chaoxing().login_with_password(
+                    user, password, wait_seconds=int((login or {}).get("wait") or 180))
             self.bus.log("学习通使用独立浏览器窗口（有头运行，平台要求不能失焦）")
             return self.chaoxing().login()
 
         br = self.ensure_browser()
-        br.goto(site_home)
+        # v1.7.1：登录必须落在「不登录就看不见」的页面。
+        # www.icve.com.cn 首页允许匿名浏览，只看 URL 永远像「已登录」，
+        # 结果账号密码根本没送出去，后面扫描才报「登录失效」。
+        entry = self._login_entry(platform, site_home) if user else site_home
+        br.goto(entry)
         br.wait(2500)
 
         if user:
@@ -204,6 +219,16 @@ class TaskRunner:
             br.wait(1500)
             br.goto(site_home)          # 登录后回到工作页，避免停在跳转页
             br.wait(2500)
+            # 真的登进去了吗：统一认证可能在「提交成功」后又被踢回来，
+            # 只看一次 URL 很容易报假成功，必须回头访问一个要登录的页面确认。
+            br.goto(entry)
+            br.wait(2500)
+            if _login_expired(br):
+                raise RuntimeError("账号密码已提交，但仍停在统一认证登录页："
+                                   "可能是账号/密码不对，或滑块验证没通过。"
+                                   "可改用「扫码 / 手动登录」")
+            br.goto(site_home)
+            br.wait(2000)
             br.shot("open_site")
             self.bus.log("账号密码登录成功", "ok")
             return "已登录（账号密码）"
@@ -615,6 +640,13 @@ class TaskRunner:
             self.bus.log(f"复核：{res['done']}/{res['total']} 已完成")
             return f"{res['done']}/{res['total']} 完成"
         plat = Zjy2(br, self.bus)
+        # v1.7.1：复核也要先进入课程，否则读到的是上一门课的目录（甚至 0 项）
+        if not plat.enter_course(course_name):
+            if _login_expired(br):
+                self.bus.log("登录状态已失效（当前停在登录页）", "error")
+                return "未登录"
+            self.bus.log(f"进入课程「{course_name}」失败，无法复核", "error")
+            return "进入课程失败"
         res = plat.verify()
         if res["total"] == 0:
             self.bus.log("目录里没读到任何资源节点：可能课程未展开或页面还在加载", "warn")

@@ -8,6 +8,7 @@
 
 import json
 import os
+import re
 import time
 
 # 默认会话目录 = 本脚本所在 suite/ 的上一级（browser/）。
@@ -57,7 +58,8 @@ class Browser:
         while time.time() < deadline:
             if stopped():
                 return {'ok': False, 'error': 'STOPPED', 'id': rid}
-            time.sleep(0.25)
+            # 0.25s → 0.05s：翻页类任务一页一次往返，这个等待直接叠加在每页耗时上
+            time.sleep(0.05)
             try:
                 with open(os.path.join(self.io, 'result.json'), encoding='utf-8') as f:
                     r = json.load(f)
@@ -180,6 +182,68 @@ class Browser:
             if i is not None:
                 return i
         return self.find_page_with_frame('mycourse/studentcourse')
+
+    # 新版课程空间（mooc2-ans/mycourse/stu）打开后默认停在「任务」标签，
+    # 章节目录要再点一下左侧「章节」，studentcourse 框架才会加载。
+    # 旧版直接落地就是目录页，点不到也不会误伤（找不到节点返回 notfound）。
+    CHAPTER_JS = r"""
+  var curs = document.querySelectorAll('[id^="cur"]');
+  if (curs.length) return 'chapter-page';          // 已经在单章节学习页
+  var els = document.querySelectorAll('a,div,span,li');
+  for (var i = 0; i < els.length; i++) {
+    var e = els[i];
+    if (e.children.length) continue;
+    if ((e.innerText || '').trim() !== '章节') continue;
+    e.click();
+    return 'clicked';
+  }
+  return 'notfound';
+"""
+
+    def open_chapter(self, timeout=15):
+        """确保章节目录可见：必要时点开「章节」标签并等框架加载。"""
+        try:
+            st = self.js(self.CHAPTER_JS)
+        except Exception:
+            return False
+        if st == 'chapter-page':
+            return True
+        if st != 'clicked':
+            return False
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            if self.has_frame('mycourse/studentcourse'):
+                return True
+            try:
+                if self.js('return document.querySelectorAll(\'[id^="cur"]\').length > 0'):
+                    return True
+            except Exception:
+                pass
+            self.wait(700)
+        return self.has_frame('mycourse/studentcourse')
+
+    def course_id(self):
+        """当前页面的 courseid（用来隔离不同课程的进度缓存）。"""
+        try:
+            for p in self.titles():
+                if p['i'] != self.page_index:
+                    continue
+                u = p['url'] or ''
+                if 'studentstudy' in u:
+                    continue
+                m = re.search(r'courseid=(\d+)', u)
+                if m:
+                    return m.group(1)
+        except Exception:
+            pass
+        try:
+            for u in self.frames() or []:
+                m = re.search(r'courseid=(\d+)', u or '')
+                if m:
+                    return m.group(1)
+        except Exception:
+            pass
+        return ''
 
     def find_page_with_frame(self, needle, auto_switch=True):
         """在所有标签页里找含指定框架的那一页，找到就把 page_index 切过去。"""

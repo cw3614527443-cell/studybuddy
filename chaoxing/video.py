@@ -38,6 +38,7 @@ import sys
 import time
 
 import catalog as catalog_mod
+import doc as doc_mod
 from client import Browser, fmt, stopped
 
 POLL = 5          # 轮询间隔（秒）
@@ -333,33 +334,43 @@ def wait_videos(b, max_s=45, kick=True):
 
 
 def video_marks(b, verbose=False):
-    """读当前章节里每个视频任务点的完成标记。
+    """读当前任务点标签页里每个任务点的完成标记（视频 / PPT / PDF 都算）。
 
     实测结论（很重要，别再靠文字判断）：
       「✓ 任务点已完成」不在 innerText 里，它是 `aria-label` + 容器类：
         <div class="ans-attach-ct videoContainer ans-job-finished">
           <div class="ans-job-icon ans-job-video" aria-label="任务点已完成">
-      所以判定必须用 `.ans-attach-ct.videoContainer.ans-job-finished`，
+      所以判定必须看 `.ans-attach-ct` 的 `ans-job-finished` / `.ans-job-icon`，
       文字匹配、body.innerText 一律无效（踩过）。
-      右侧目录橙色 ≠ 视频没刷完，橙色只代表本章节还有测验/文档没做。
+      右侧目录橙色 ≠ 没刷完，橙色只代表本章节还有别的任务点没做。
+
+    v1.7.2：以前只数 `.videoContainer`，PPT/PDF 任务点没有这个 class，
+    于是「PPT 明明显示任务点已完成」也算不出来，又被逐页翻了一遍 —— 白刷。
+    现在按全部 `.ans-attach-ct` 统计：total / finished 是所有任务点，
+    videos / videoFinished 才是视频子集。
     """
     js = r"""
     return (function(){
-      var seen=[], acc={videos:0, finished:0, marks:[]};
+      var seen=[], acc={total:0, finished:0, videos:0, videoFinished:0, marks:[]};
       function scan(w,d){
         if(d>5) return;
         for(var k=0;k<seen.length;k++){ if(seen[k]===w) return; }
         seen.push(w);
         try{
           var doc=w.document;
-          var vs=doc.querySelectorAll('.ans-attach-ct.videoContainer');
+          var vs=doc.querySelectorAll('.ans-attach-ct');
           for(var i=0;i<vs.length;i++){
             var el=vs[i];
-            var fin=el.classList.contains('ans-job-finished');
             var ic=el.querySelector('.ans-job-icon');
-            acc.videos++;
+            var fin=el.classList.contains('ans-job-finished') ||
+                    !!(ic && (ic.getAttribute('aria-label')||'').indexOf('已完成') >= 0);
+            var isVideo=el.classList.contains('videoContainer');
+            // 既没有 finished 标记、也没有 job 图标的，是普通附件，不算任务点
+            if(!fin && !ic && !el.classList.contains('ans-job-unfinished')) continue;
+            acc.total++;
             if(fin) acc.finished++;
-            acc.marks.push({fin:fin ? 1 : 0,
+            if(isVideo){ acc.videos++; if(fin) acc.videoFinished++; }
+            acc.marks.push({fin:fin ? 1 : 0, video:isVideo ? 1 : 0,
                             label:(ic && ic.getAttribute('aria-label')) || ''});
           }
         }catch(e){}
@@ -389,11 +400,16 @@ def video_marks(b, verbose=False):
 
 
 def page_label_done(b, verbose=False):
-    """本章所有视频任务点是否都已完成（绿标）。"""
+    """当前标签页里的任务点是否全部显示「任务点已完成」（绿标）。
+
+    v1.7.2：以前只数视频，PPT 任务点永远算出 0 个视频 → 判定「未完成」，
+    于是已经刷完的 PPT 又被逐页翻一遍（每页 1.4 秒，56 页就是 80 秒）。
+    现在按全部任务点统计。
+    """
     acc = video_marks(b, verbose=verbose)
-    v = acc.get('videos', 0)
-    f = acc.get('finished', 0)
-    return v > 0 and f >= v
+    total = acc.get('total', 0)
+    fin = acc.get('finished', 0)
+    return total > 0 and fin >= total
 
 
 def wait_label_done(b, tries=3, gap=10):
@@ -404,6 +420,110 @@ def wait_label_done(b, tries=3, gap=10):
         if page_label_done(b):
             return True
     return False
+
+
+# ---------------------------------------------------------------- 章节内多任务点
+
+TABS_JS = r"""
+return (function(){
+  var out=[];
+  var lis=document.querySelectorAll('.prev_ul > li');
+  for(var i=0;i<lis.length;i++){
+    var e=lis[i];
+    out.push({i:i,
+              title:(e.getAttribute('title')||'').trim(),
+              active:e.classList.contains('active')});
+  }
+  return JSON.stringify(out);
+})()
+"""
+
+
+def tabs(b):
+    """读章节顶部的任务点标签（如「1 PPT / 2 视频」）。
+
+    一个章节常常挂多个任务点：PPT + 视频 + 文档。旧逻辑只处理打开章节时
+    默认选中的第一个（通常是 PPT），同节的视频从来没被点开过 ——
+    目录里的「N 个待完成任务点」就一直清不掉。
+    """
+    try:
+        return json.loads(b.js(TABS_JS)) or []
+    except Exception:
+        return []
+
+
+def switch_tab(b, i, settle=3.5):
+    """切到第 i 个任务点标签，等它把内容加载出来。"""
+    try:
+        r = b.js('var l=document.querySelectorAll(".prev_ul > li");'
+                 'if(l[%d]){l[%d].click(); return 1;} return 0;' % (i, i))
+    except Exception:
+        return False
+    time.sleep(settle)
+    return str(r).strip() in ('1', 'true')
+
+
+LIMIT_JS = r"""
+return (function(){
+  var seen=[], hit=false;
+  function scan(w,d){
+    if(d>5 || hit) return;
+    for(var k=0;k<seen.length;k++){ if(seen[k]===w) return; }
+    seen.push(w);
+    try{
+      var doc=w.document;
+      var all=doc.querySelectorAll('div,p,span,em,li');
+      for(var i=0;i<all.length;i++){
+        var t=(all[i].textContent||'').trim();
+        if(t.length>90 || t.indexOf('任务点完成数已达上限')<0) continue;
+        try{
+          var st=w.getComputedStyle(all[i]);
+          if(st.display==='none' || st.visibility==='hidden') continue;
+          var r=all[i].getBoundingClientRect();
+          if(r.width<1 || r.height<1) continue;
+        }catch(e){}
+        hit=true; return;
+      }
+    }catch(e){}
+    try{
+      var fs=w.document.querySelectorAll('iframe');
+      for(var j=0;j<fs.length;j++){
+        try{ if(fs[j].contentWindow) scan(fs[j].contentWindow,d+1); }catch(e){}
+      }
+    }catch(e){}
+  }
+  scan(window,0);
+  return hit ? '1' : '0';
+})()
+"""
+
+
+def job_limit_hit(b):
+    """平台是否在提示「今日视频任务点完成数已达上限」。
+
+    这是硬限制：今天继续刷，视频也不会被计成完成。以前不认这个提示，
+    程序会在「播放→不算完成→重试」里空转到超时，看着就是「怎么这么慢」。
+    """
+    try:
+        return str(b.js(LIMIT_JS)).strip() in ('1', 'true')
+    except Exception:
+        return False
+
+
+def wait_marks(b, timeout=16):
+    """等任务点标记渲染出来（knowledge iframe 要 8~10 秒才挂上 ans-attach-ct）。
+
+    v1.7.2：以前打开章节只等 3 秒就判定，iframe 还没加载完 → total=0 →
+    「任务点已完成」被判成「未完成」，然后把早就刷完的 PPT 又逐页翻一遍。
+    """
+    deadline = time.time() + timeout
+    acc = {}
+    while time.time() < deadline:
+        acc = video_marks(b)
+        if acc.get('total'):
+            return acc
+        time.sleep(1.5)
+    return acc
 
 
 def open_chapter(b, cid, course_url):
@@ -588,10 +708,13 @@ def audit(b, targets, session, only=None):
 
 
 # ---------------------------------------------------------------- 单条目
+GOOD_TAB = {'done', 'skip-done', 'video-done', 'doc-done', 'doc-flushed'}
+
+
 def run_one(b, item, session, ratio, max_sec, retry=1, dry=False):
+    """刷一个章节：逐个任务点标签处理（PPT / 视频 / 文档都会走到）。"""
     tag = item['no']
     cid = item['id']
-    before_pending = item.get('pending', 0)   # 本章节刷之前剩几个任务点
     shot_base = 'v-%s' % tag.replace('.', '-')
     print('[%s] %s（id=%s）' % (tag, item['title'][:44], cid), flush=True)
     b.shot(shot_base + '-0-pre.png')
@@ -600,20 +723,94 @@ def run_one(b, item, session, ratio, max_sec, retry=1, dry=False):
         print('  [%s] 打不开章节，跳过' % tag, flush=True)
         return {'no': tag, 'id': cid, 'status': 'openfail'}
 
-    time.sleep(3)
+    time.sleep(2)
     bring_front(b)
     install_guard(b)      # 每次导航后都要重装（补丁只在当前文档有效）
+    wait_marks(b, 12)     # 等 iframe 把任务点标记挂上，别过早判成「未完成」
 
-    # 视频上方已显示「任务点已完成」就直接跳过（右边目录橙色只是章节还有测验没答）
-    if page_label_done(b):
-        print('  [%s] 视频上方已是「任务点已完成」，跳过不刷' % tag, flush=True)
-        b.shot(shot_base + '-skip.png')
-        return {'no': tag, 'id': cid, 'status': 'skip-done', 'label': 'done'}
+    groups = tabs(b)
+    if len(groups) <= 1:
+        r = _run_tab(b, item, session, ratio, max_sec, retry, dry, shot_base)
+        r['tab'] = (groups[0].get('title') if groups else '') or ''
+        return r
+
+    print('  [%s] 本节 %d 个任务点：%s' % (
+        tag, len(groups),
+        ' / '.join('%d %s' % (g['i'] + 1, g.get('title') or '任务点')
+                   for g in groups)), flush=True)
+
+    parts = []
+    for g in groups:
+        name = g.get('title') or ('任务点%d' % (g['i'] + 1))
+        if g['i']:
+            if not switch_tab(b, g['i']):
+                print('  [%s] %s 切不过去，跳过' % (tag, name), flush=True)
+                parts.append({'tab': name, 'status': 'tabfail'})
+                continue
+            install_guard(b)
+            wait_marks(b, 9)
+        if dry:
+            parts.append({'tab': name, 'status': 'dry'})
+            continue
+        if page_label_done(b):
+            print('  [%s] %s：已是「任务点已完成」，跳过' % (tag, name), flush=True)
+            b.shot(shot_base + '-skip.png')
+            parts.append({'tab': name, 'status': 'skip-done'})
+            continue
+        r = _run_tab(b, item, session, ratio, max_sec, retry, dry, shot_base)
+        r['tab'] = name
+        parts.append(r)
+        if r.get('status') == 'limit':
+            break
+
+    bad = [p for p in parts if p.get('status') not in GOOD_TAB]
+    if not bad:
+        status = 'done'
+    elif any(p.get('status') == 'limit' for p in parts):
+        status = 'limit'
+    else:
+        status = bad[0].get('status') or 'unconfirmed'
+    return {'no': tag, 'id': cid, 'status': status, 'parts': parts,
+            'pending_before': item.get('pending', 0)}
+
+
+def _run_tab(b, item, session, ratio, max_sec, retry, dry, shot_base, tab=''):
+    """处理当前已选中的那个任务点（视频 / 文档 / 其它）。"""
+    tag = item['no']
+    cid = item['id']
+    before_pending = item.get('pending', 0)   # 本章节刷之前剩几个任务点
+
+    # 文档类任务点（PPT/PDF 在线阅读）：先花 7 秒探一下阅读器在不在。
+    # 以前是「先等 45 秒视频再看文档」，PPT 页面永远等不到 video 元素，
+    # 等于每个文档任务点白等 38 秒；一门课十几个文档就是七八分钟。
+    if doc_mod.has_doc(b, timeout=7):
+        # 阅读器出来了，说明 iframe 也加载完了，此时再确认一次「是否已完成」：
+        # 刚打开章节那一瞬间标记常常还没挂上，只看一次会把已完成的 PPT 又翻一遍。
+        if page_label_done(b):
+            print('  [%s] %s：已是「任务点已完成」，跳过不刷' % (tag, tab or '文档'), flush=True)
+            b.shot(shot_base + '-skip.png')
+            return {'no': tag, 'id': cid, 'status': 'skip-done', 'pending_before': before_pending}
+        # 逐页翻到底再等回写。这里不做逐个 reload 复核：reload + 重新解析
+        # 目录要 15~30 秒，一门课十几个文档就是十几分钟。整门课跑完统一复核。
+        dr = doc_mod.brush(b, log=print, tag=tag, verify=None, wait=10)
+        if dr.get('kind') == 'doc':
+            b.shot(shot_base + '-doc.png')
+            st = dr.get('status')
+            status = {'done': 'doc-done'}.get(st, 'doc-flushed')
+            print('  [%s] 文档任务点 %d 页 => %s' % (tag, dr.get('pages'), status), flush=True)
+            return {'no': tag, 'id': cid, 'status': status,
+                    'pending_before': before_pending,
+                    'pages': dr.get('pages'),
+                    'doc_status': dr.get('status')}
 
     vids = wait_videos(b, 45)
     b.shot(shot_base + '-1-page.png')
     if not vids:
-        print('  [%s] 没有 video 元素（测验/文档/讨论），交给人工' % tag, flush=True)
+        if job_limit_hit(b):
+            print('  [%s] 平台提示「今日视频任务点完成数已达上限」，今天再刷也不计完成'
+                  % tag, flush=True)
+            return {'no': tag, 'id': cid, 'status': 'limit'}
+        print('  [%s] 既没有 video 也没有文档（测验/讨论），交给人工' % tag, flush=True)
         return {'no': tag, 'id': cid, 'status': 'novideo'}
 
     print('  [%s] 发现 %d 个播放器：%s' % (
@@ -656,6 +853,10 @@ def run_one(b, item, session, ratio, max_sec, retry=1, dry=False):
     ok = all(r.get('ok') for r in results) if results else False
     if green:
         status = 'done'
+    elif job_limit_hit(b):
+        # 播完了却没打绿标，页面还提示「今日视频任务点完成数已达上限」：
+        # 今天再重试也不会算完成，直接标记出来，别空转。
+        status = 'limit'
     elif ok:
         status = 'unconfirmed'   # 播到结尾了但绿标没出现，下次重跑会再播一遍
     else:
@@ -707,7 +908,7 @@ def report_remaining(b):
         for x in other:
             print('    %-6s %-44s %d 个待完成' % (x['no'], x['title'][:42], x['pending']))
     if leftover:
-        print('  视频已刷完、但章节里还有非视频任务点（文档/测验）：')
+        print('  已刷过但仍有剩余任务点（多半是章节测验，或这份文档没认到完成）：')
         for x in leftover:
             print('    %-6s %-44s 剩 %d 个' % (x['no'], x['title'][:42], x['pending']))
     if quiz:

@@ -247,12 +247,13 @@ class ChaoxingSuite:
                 sys.path.insert(0, sd)
             import client
             import catalog
+            import doc
             import run
             import video
             import exam
             import chapter_quiz
             client.set_stop_check(self.bus.should_stop)
-            self._modules = dict(client=client, catalog=catalog, run=run,
+            self._modules = dict(client=client, catalog=catalog, doc=doc, run=run,
                                  video=video, exam=exam, chapter_quiz=chapter_quiz)
         return self._modules
 
@@ -298,22 +299,43 @@ class ChaoxingSuite:
         self._pump.start()
         deadline = time.time() + 45
         state_path = os.path.join(self.root, "io", "state.json")
+        stage = None
         while time.time() < deadline:
             if self.proc.poll() is not None:
                 raise RuntimeError("学习通浏览器驱动启动失败，请看上面的日志")
             try:
                 with open(state_path, encoding="utf-8") as f:
                     stage = (json.load(f) or {}).get("stage")
-                if stage in ("qr-ready", "nav-error"):
+                if stage in ("qr-ready", "logged-in", "nav-error"):
                     break
             except Exception:
                 pass
             time.sleep(0.4)
         if self.proc.poll() is None:
-            shot = os.path.join(self.root, "shots", "01-login.png")
-            if os.path.exists(shot):
-                self.bus.shot(shot)
+            if stage == "logged-in":
+                # 带着上次的登录态进来：别把登录页截图当成「最新画面」推给用户，会误以为又要扫码
+                self.bus.log("检测到上次的登录状态，已免登录进入学习通")
+            else:
+                shot = os.path.join(self.root, "shots", "01-login.png")
+                if os.path.exists(shot):
+                    self.bus.shot(shot)
         return self.browser()
+
+    def save_session(self):
+        """把当前 cookie 立刻落盘（不等浏览器正常退出）。
+
+        真机验证过：登录成功后如果进程是被强杀/管道断开带走的，Chromium 不会
+        把 passport2 的登录 cookie 写进 profile，下一次启动又得重新扫码。
+        """
+        try:
+            b = self.browser()
+            r = b.send({"type": "save-state"}, timeout=10)
+            if r.get("ok"):
+                n = (r.get("data") or {}).get("count")
+                self.bus.log(f"已保存登录状态（{n} 条 cookie），下次启动免登录")
+            return bool(r.get("ok"))
+        except Exception:
+            return False
 
     # 驱动的每条指令都会回一行「<id> <type> OK」，一次刷课几百条，
     # 全塞进界面日志会把有用的信息顶走。只保留出错与关键阶段。
@@ -325,7 +347,7 @@ class ChaoxingSuite:
                 line = line.rstrip()
                 if not line or self._DRIVER_NOISE.match(line):
                     continue
-                if " ERR " in line or line.startswith(("QR READY", "NAV ERROR")):
+                if " ERR " in line or line.startswith(("QR READY", "LOGGED IN", "SESSION", "NAV ERROR")):
                     self.bus.log("[driver] " + line[:300],
                                  "error" if " ERR " in line else "info")
         except Exception:
@@ -396,6 +418,7 @@ class ChaoxingSuite:
         if isinstance(res, dict) and res.get("logged_in") is False:
             raise RuntimeError("看起来还没登录成功（仍停在登录页）。"
                                "请重新点「① 启动浏览器 / 登录」，在弹出窗口里扫码或用账号密码登录")
+        self.save_session()
         return "学习通已登录"
 
     def login_with_password(self, user, password, wait_seconds=180):
@@ -418,6 +441,7 @@ class ChaoxingSuite:
                 self.bus.shot(os.path.join(self.root, "shots", "login-ok.png"))
             except Exception:
                 pass
+            self.save_session()
             return "学习通已登录（账号密码）"
         raise RuntimeError("账号密码登录没成功：%s。可点「扫码 / 手动登录」，"
                            "在弹出的窗口里自己登录一次" % (res.get("reason") or "未知原因"))
@@ -479,10 +503,12 @@ class ChaoxingSuite:
                 results = json.load(f) or []
         except Exception:
             results = []
-        good = {"done", "video-done", "skip-done"}
+        good = {"done", "video-done", "skip-done", "doc-done", "doc-flushed"}
         ok = sum(1 for r in results if r.get("status") in good)
         bad = [r for r in results if r.get("status") in
-               ("timeout", "openfail", "unconfirmed", "fillerror")]
+               ("timeout", "openfail", "unconfirmed", "fillerror", "doc-unconfirmed",
+                "limit", "novideo", "tabfail")]
+        limit_hit = any(r.get("status") == "limit" for r in results)
         quiz = []
         try:
             with open(os.path.join(self.root, "io", "remaining.json"), encoding="utf-8") as f:
@@ -502,8 +528,12 @@ class ChaoxingSuite:
         except Exception:
             pass
         aborted = bool(self.bus.should_stop()) or (len(results) >= 3 and len(bad) >= 2)
+        if limit_hit:
+            self.bus.log("平台提示「今日视频任务点完成数已达上限」：视频今天再刷也不会计完成，"
+                         "明天再跑剩下的就行。文档类任务点不受这个限制。", "warn")
         self.bus.progress(100, "刷课结束")
         return {"todo": len(results), "ok": ok, "aborted": aborted, "quiz": quiz,
+                "limit": limit_hit,
                 "done_after": done, "total_after": total}
 
     def answer_quiz(self, course_name, dry_run=False, auto_submit=True):
