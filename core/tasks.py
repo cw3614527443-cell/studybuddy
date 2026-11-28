@@ -310,6 +310,20 @@ class TaskRunner:
             extra = f"（{n_done}/{n_total}）" if n_total else ""
             self.bus.log(f"  [{i}/{total}] 「{name}」→ {note}{extra}",
                          "ok" if brushable else "info")
+            # 每门课都会新开一个标签页。扫 12 门就堆 12 个，越扫越卡，
+            # 还会让后面的页面选择变乱 —— 每门做完就收一次，只留列表页。
+            try:
+                keep = getattr(plat, "MY_COURSES_URL", None)
+                br.close_extra_tabs(keep)
+                if br.page is not plat.p:
+                    plat.p = br.page
+            except Exception:
+                pass
+        # 未知（检测失败）的那几门也要收一次，否则同样会留一堆页
+        try:
+            br.close_extra_tabs(getattr(plat, "MY_COURSES_URL", None))
+        except Exception:
+            pass
 
         self.bus.courses(items, platform)
         self.bus.progress(100, f"识别完成：{len(items)} 门")
@@ -529,7 +543,7 @@ class TaskRunner:
         self.bus.log(f"完成：共 {res['total']} 项，处理 {res['ok']}/{res['todo']}")
         return f"共 {res['total']} 项，处理 {res['ok']}/{res['todo']}"
 
-    def action_watch_time(self, target_hours=5.0, max_minutes=300, platform="ai"):
+    def action_watch_time(self, target_hours=5.0, max_minutes=300, platform="ai", course_name=""):
         if platform == "cx":
             self.bus.log("学习通刷视频必须真实播到结尾，没有独立的「刷观看时长」入口", "warn")
             return "学习通不支持刷观看时长"
@@ -542,7 +556,8 @@ class TaskRunner:
             self.bus.progress(pct, text)
 
         res = plat.brush_watch_time(target_hours=target_hours,
-                                    max_minutes=max_minutes, progress_cb=cb)
+                                    max_minutes=max_minutes, progress_cb=cb,
+                                    course_name=course_name)
         self.bus.progress(100, "刷时长结束")
 
         if res.get("error"):

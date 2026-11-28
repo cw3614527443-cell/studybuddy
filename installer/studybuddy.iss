@@ -9,11 +9,11 @@
 ;   由程序读取 installed.flag 判定；这样卸载不会误删登录态，重装免扫码。
 
 #define MyAppName "StudyBuddy 学习助手"
-#define MyAppVersion "1.8.0"
+#define MyAppVersion "1.9.1"
 #define MyAppPublisher "cw3614527443-cell"
 #define MyAppURL "https://github.com/cw3614527443-cell/studybuddy"
 #define MyAppExeName "StudyBuddy.exe"
-#define SrcDir "..\dist_v180\StudyBuddy"
+#define SrcDir "..\dist_v191\StudyBuddy"
 
 [Setup]
 AppId={{9B2F4C71-6E3A-4D58-9C0B-7A1E53B8D204}

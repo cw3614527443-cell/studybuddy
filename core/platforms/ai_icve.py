@@ -57,6 +57,16 @@ class AiIcve:
           ignore_stop=True：完全无视停止标志，先等 25 秒，还读不到就刷新重试 12 秒。
         """
         self.br.goto(AI_ICVE_HOME)
+        # v1.9.1 修：首页是 SPA，**URL 已经等于首页时 goto 不会重新请求数据**，
+        # 数字区块就保持上一次的状态（实测：扫描完再读，永远读不到「观看时长」，
+        # 而新开一个标签页访问同一地址立刻就有数字）。所以这里补一次硬刷新。
+        try:
+            cur = (self.br.current_url() or "").rstrip("/")
+            if cur.endswith("my-excellent-home"):
+                self.br.reload()
+                self.br.wait(2500)
+        except Exception:
+            pass
         for attempt in (1, 2):
             # 首次别死等太久：10 秒没出来基本就是本次导航落错了路由，刷新比干等有效
             budget = min(timeout, 10) if attempt == 1 else timeout
@@ -233,6 +243,29 @@ class AiIcve:
                 .filter(t => t && t.length < 60)"""
         )
 
+    def _click_course_card_real(self, course_name, timeout=12):
+        """用真实鼠标点击课程卡片，并捕获它弹出的新标签页。
+
+        v1.9.1 修（真机取证）：卡片是 Vue 组件，`e.click()`（JS 派发）只返回
+        true，**不会触发路由跳转** —— 整个扫描因此 12 门里 6 门「未确认」，
+        读进度/刷课/复核全读到 0 资源。必须用 Playwright 的真实点击 +
+        `expect_popup` 才能拿到那个新开的课程标签页。
+        """
+        card = self.p.locator(".course-card").filter(
+            has=self.p.locator(".course-name", has_text=course_name)
+        ).first
+        if not card.count():
+            return None
+        try:
+            with self.p.expect_popup(timeout=int(timeout * 1000)) as info:
+                card.click(timeout=8000)
+            return info.value
+        except Exception:
+            # 有些课程是同页跳转（不弹新标签），点完看当前页是否已经变成课程页
+            if "spoccourse" in (self.br.current_url() or ""):
+                return self.p
+            return None
+
     def _open_course_for_probe(self, course_name, timeout=14):
         """从课程列表页点开指定课程，落到教学内容页。返回是否成功。
 
@@ -243,11 +276,13 @@ class AiIcve:
         · 以前只等 8 秒 + 只看 URL 含 spoccourse，恰好卡在中间页上，
           于是账号里**第一门课永远「检测失败，已跳过」**。现在按课程名轮询等它落地。
         · 课程可能在校内私有课 / 校外公开课两个标签下，也可能在第 2 页。
+
+        v1.9.1：点击方式改为真实鼠标 + popup 捕获（见 `_click_course_card_real`）。
         """
         self.br.goto(self.MY_COURSES_URL)
         self.br.wait(1800)
 
-        opened = False
+        popup = None
         for label in self.COURSE_TABS:
             if not self._click_tab(label):
                 continue
@@ -255,30 +290,30 @@ class AiIcve:
             for no in range(1, maxp + 1):
                 if no > 1 and not self._goto_page(no):
                     break
-                deadline = time.time() + 5
-                while time.time() < deadline:
-                    try:
-                        opened = bool(self.p.evaluate(self._JS_CLICK_COURSE, course_name))
-                    except Exception:
-                        opened = False
-                    if opened:
-                        break
-                    self.br.wait(700)
-                if opened:
+                popup = self._click_course_card_real(course_name, timeout=8)
+                if popup is not None:
                     break
-            if opened:
+            if popup is not None:
                 break
-        if not opened:
+        if popup is None:
             return False
 
         # 等新标签页真的变成课程页（admin/pedding 只是过路页，别在那儿下结论）
-        if not self.br.wait_course_tab(course_name, timeout=25):
-            self.br.switch_to_newest_tab("icve", timeout=3)
-        self.p = self.br.page
-        self.br.wait(1500)
+        self.p = popup
+        self.br.page = popup
+        deadline = time.time() + max(20, timeout + 10)
+        while time.time() < deadline:
+            try:
+                url = popup.url or ""
+            except Exception:
+                return False
+            if "spoccourse" in url:
+                break
+            self.br.wait(500)
+        self.br.wait(1200)
         # 知识图谱页要点「教学内容」才到真正的目录页
-        if "spoccourseZstp" in self.br.current_url():
-            for _ in range(3):
+        if "spoccourseZstp" in (popup.url or ""):
+            for _ in range(4):
                 self.p.evaluate(
                     """() => {
                         const e=[...document.querySelectorAll('.menu_item,.tab-item,li,div')]
@@ -287,10 +322,20 @@ class AiIcve:
                         if(e) (e.querySelector('a,span')||e).click();
                     }"""
                 )
-                self.br.wait(2500)
-                if "spoccourseIndex" in self.br.current_url():
+                self.br.wait(2200)
+                if "spoccourseIndex" in (popup.url or ""):
                     break
-        return "spoccourse" in self.br.current_url()
+        # 用课程名校验，避免兜底选中上一次残留的课程页
+        try:
+            head = self.p.evaluate(
+                "() => ((document.querySelector('.info_title')||document.body).innerText||'').slice(0,300)"
+            ) or ""
+        except Exception:
+            head = ""
+        if head and course_name not in head:
+            self._log(f"打开的页面不是「{course_name}」（当前 {head[:40]}）", "warn")
+            return False
+        return "spoccourse" in (popup.url or "")
 
     def probe_course_info(self, course_name, timeout=14):
         """返回 {brushable, done, total}；判断失败返回 None。
@@ -336,35 +381,42 @@ class AiIcve:
             return None
         return bool(info.get("brushable"))
 
-    def enter_course(self, course_name="大学生心理健康", timeout=20):
-        """从首页课程卡片进入课程教学内容。
+    def enter_course(self, course_name="大学生心理健康", timeout=25):
+        """进入课程的「教学内容」页（刷课、读进度都靠它）。
 
-        v1.0.6：首页卡片是异步渲染的，之前只等 2.5 秒就找一次，网络慢一点就报
-        「未找到课程」，连带复核也失败。改成轮询 20 秒，期间必要时重新打开首页。
+        v1.9.1 修：这里原来跟 `_open_course_for_probe` 是两套逻辑 ——
+        探测那条路已经处理了「点卡片先开中间页 admin/pedding，5~10 秒后才到
+        spoccourseZstp，再点教学内容」的全过程，而这条旧路只等 3.5 秒再点一次
+        「教学内容」，于是**扫描能认出课程、点刷课却必然报「进入课程失败」**。
+        现在两条路合并，都走 `_open_course_for_probe`，只在末尾多校验一次
+        是否真的落到了目录页。
         """
-        deadline = time.time() + timeout
-        ok = False
-        while True:
-            ok = self.p.evaluate(
-                """(name) => {
-                    const e=[...document.querySelectorAll('.course-name')].find(x=>(x.textContent||'').trim()===name);
-                    if(!e) return false; e.click(); return true;
-                }""",
-                course_name,
-            )
-            if ok:
-                break
-            if time.time() > deadline:
-                self._log(f"未找到课程「{course_name}」，请确认课程名与首页卡片完全一致"
-                          "（差一个字都会找不到）", "warn")
-                return False
-            if "my-excellent-home" not in self.br.current_url():
-                self.br.goto(AI_ICVE_HOME)
-            self.br.wait(1500)
-        self.br.wait(3500)
-        self.br.click_text("教学内容", timeout=6000)
-        self.br.wait(3000)
-        return "kcnr" in self.br.current_url()
+        if not self._open_course_for_probe(course_name, timeout=max(14, timeout)):
+            self._log(f"未找到课程「{course_name}」，请确认课程名与首页卡片完全一致"
+                      "（差一个字都会找不到）", "warn")
+            return False
+
+        url = self.br.current_url()
+        if "spoccourseIndex" in url or "kcnr" in url:
+            return True
+
+        # 还停在知识图谱 / 中间页：再给「教学内容」几次机会
+        if "spoccourseZstp" in url:
+            for _ in range(3):
+                self.p.evaluate(
+                    """() => {
+                        const e=[...document.querySelectorAll('.menu_item,.tab-item,li,div')]
+                            .filter(x=>(x.textContent||'').trim()==='教学内容')
+                            .pop();
+                        if(e) (e.querySelector('a,span')||e).click();
+                    }"""
+                )
+                self.br.wait(2500)
+                url = self.br.current_url()
+                if "spoccourseIndex" in url or "kcnr" in url:
+                    return True
+        self._log(f"点了「{course_name}」但没能落到教学内容页（当前 {url[:70]}）", "warn")
+        return False
 
     # ---------- 目录 ----------
     def expand_all(self, passes=5):
@@ -391,7 +443,9 @@ class AiIcve:
             )
             total += n
             self.br.wait(1500)
-            cnt = self.p.evaluate("() => document.querySelectorAll('div.node').length")
+            cnt = self.p.evaluate(
+                "() => document.querySelectorAll('div.node,.listItem[id]').length"
+            )
             if n == 0 and cnt == prev_cnt:
                 break
             prev_cnt = cnt
@@ -402,15 +456,43 @@ class AiIcve:
 
         类型按名字判定（core/kinds.py）：视频、文档之外的「测验/作业/讨论」
         会被标成 quiz —— 这些不能靠拖进度条完成，必须自己在网页里答题。
+
+        v1.9.1 修（真机）：新版 AI 优课课程目录是 `.listItem[id]`，进度在
+        `[role=progressbar][aria-valuenow]`（文本形如「已学：100%」）。旧代码
+        只认 `div.node` + `p.title`，于是明明有 12 章却统计成 0 项，
+        读进度/复核全报「目录里没找到任何资源节点」。两套结构都支持。
         """
         raw = self.p.evaluate(
-            """() => [...document.querySelectorAll('div.node')].filter(n=>n.id && n.querySelector('p.title'))
-                .map(n=>{
-                    const name=(n.querySelector('p.title').textContent||'').trim();
+            """() => {
+                const out=[], seen=new Set();
+                for (const n of document.querySelectorAll('.listItem[id]')) {
+                    if (seen.has(n.id)) continue;
+                    const t=n.querySelector('.tit,.name,.course-name');
+                    const name=((t&&t.innerText)||'').trim();
+                    if (!name) continue;
+                    const bar=n.querySelector('[role=progressbar][aria-valuenow]');
+                    const txtEl=n.querySelector('.el-progress__text,.ziProgress');
+                    const txt=txtEl ? (txtEl.innerText||'') : '';
+                    let pct = bar ? parseInt(bar.getAttribute('aria-valuenow'),10) : -1;
+                    if (!Number.isFinite(pct) || pct < 0) {
+                        const m=txt.match(/(\\d+)\\s*%/);
+                        pct = m ? parseInt(m[1],10) : 0;
+                    }
+                    seen.add(n.id);
+                    out.push({id:n.id, name, done:pct>=100});
+                }
+                for (const n of document.querySelectorAll('div.node')) {
+                    if (!n.id || seen.has(n.id)) continue;
+                    const t=n.querySelector('p.title');
+                    const name=((t&&t.textContent)||'').trim();
+                    if (!name) continue;
                     const mark=n.querySelector('i[class*=checkmark]');
-                    const cls=mark?String(mark.className):'';
-                    return {id:n.id, name, done:cls.includes('wc')};
-                })"""
+                    seen.add(n.id);
+                    out.push({id:n.id, name,
+                              done:!!mark && String(mark.className).includes('wc')});
+                }
+                return out;
+            }"""
         )
         for r in raw:
             r["kind"] = kind_of_name(r["name"])
@@ -807,16 +889,24 @@ class AiIcve:
                 "quiz": [x["name"] for x in quizzes]}
 
     # ---------- 刷时长 ----------
-    def brush_watch_time(self, target_hours=5.0, max_minutes=300, progress_cb=None):
-        """连续真实播放视频，把观看时长刷到目标小时。"""
+    def brush_watch_time(self, target_hours=5.0, max_minutes=300, progress_cb=None,
+                         course_name=""):
+        """连续真实播放视频，把观看时长刷到目标小时。
+
+        course_name 为空时沿用老行为（「大学生心理健康」）；界面会把下拉框里
+        选中的那门传进来 —— 之前写死默认值，用户选了 A 课却去刷 B 课。
+        """
         h0, c0 = self.read_watch()
         self._log(f"起始 观看时长={h0}时 学习次数={c0}")
         if h0 is not None and h0 >= target_hours:
             return {"start": h0, "end": h0, "reached": True}
         # 刷时长要从 0 开始计时，续播弹窗优先点「重新开始」
         self.br.guard_set(prefer_resume=False)
-        if not self.enter_course():
-            return {"start": h0, "end": h0, "reached": False, "error": "进入课程失败"}
+        want = (course_name or "").strip() or "大学生心理健康"
+        self._log(f"刷时长的课程：{want}")
+        if not self.enter_course(want):
+            return {"start": h0, "end": h0, "reached": False,
+                    "error": f"进入课程失败（{want}）"}
         self.expand_all()
         vids = [x for x in self.list_resources() if x["kind"] == "video"]
         if not vids:
@@ -885,7 +975,24 @@ class AiIcve:
 
     # ---------- 复核 ----------
     def verify(self):
-        """展开全部并统计完成情况。"""
+        """展开全部并统计完成情况。
+
+        v1.9.1 修：真机读进度报「目录里没读到任何资源节点」——`enter_course`
+        可能停在知识图谱页（spoccourseZstp）而非目录页（spoccourseIndex），
+        此时页面上根本没有 `.node`。zjy2 的 verify 会先 go_index()，这里补上。
+        """
+        if "spoccourseZstp" in (self.br.current_url() or ""):
+            for _ in range(3):
+                self.p.evaluate(
+                    """() => {
+                        const e=[...document.querySelectorAll('.menu_item,.tab-item,li,div')]
+                            .filter(x=>(x.textContent||'').trim()==='教学内容').pop();
+                        if(e) (e.querySelector('a,span')||e).click();
+                    }"""
+                )
+                self.br.wait(2200)
+                if "spoccourseIndex" in (self.br.current_url() or ""):
+                    break
         self.expand_all()
         items = self.list_resources()
         done = sum(1 for x in items if x["done"])

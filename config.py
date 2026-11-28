@@ -71,8 +71,12 @@ DEFAULT_TARGET_HOURS = 5.0
 # 浏览器调试端口（同时只允许一个实例占用）；可用 SB_CDP_PORT 覆盖
 CDP_PORT = int(os.environ.get("SB_CDP_PORT") or 9222)
 
+# 手机远控端口（默认关闭，用户在主界面点「手机远控」才启动）；可用 SB_REMOTE_PORT 覆盖。
+# 只给同一局域网 / Tailscale 虚拟网段用，不要映射到公网。
+REMOTE_PORT = int(os.environ.get("SB_REMOTE_PORT") or 8765)
+
 APP_NAME = "StudyBuddy 学习助手"
-APP_VERSION = "1.8.0"
+APP_VERSION = "1.9.1"
 
 
 # ---------------------------------------------------------------------------

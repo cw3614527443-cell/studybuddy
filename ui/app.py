@@ -19,8 +19,9 @@ import tkinter as tk
 from tkinter import messagebox
 
 from config import (APP_NAME, APP_VERSION, AI_ICVE_HOME, DEFAULT_TARGET_HOURS,
-                    save_account)
+                    REMOTE_PORT, save_account)
 from core.events import EventBus
+from core.remote import RemoteHub, RemoteServer
 from core.tasks import TaskRunner
 from ui import widgets as W
 from ui.login_dialog import LoginDialog
@@ -71,6 +72,13 @@ class App:
         # 每个平台只认自己 key 下的结果。
         self._course_cache = {}
         self._courses_platform = None
+
+        # 手机远控（v1.9.0）：默认不监听，用户点「手机远控」才启动。
+        # hub 是状态中枢，server 是 HTTP 外壳；两者的分工见 core/remote.py 顶部注释。
+        self.remote_hub = RemoteHub(port=REMOTE_PORT)
+        self.remote_server = RemoteServer(self.remote_hub)
+        self._remote_dialog = None
+        self._register_remote_actions()
 
         W.init_scale(root)                      # 必须在建控件前定下缩放比
         root.title(f"{APP_NAME} v{APP_VERSION}")
@@ -160,6 +168,9 @@ class App:
 
         bottom = tk.Frame(bar, bg=W.CARD)
         bottom.pack(side="bottom", fill="x", padx=p(12), pady=(0, p(10)))
+        self.btn_remote = W.NavButton(bottom, text="手机远控", kind="link",
+                                      command=self.on_remote, height=28)
+        self.btn_remote.pack(fill="x")
         self.btn_settings = W.NavButton(bottom, text="⚙ 大模型设置", kind="link",
                                         command=self.on_settings, height=28)
         self.btn_settings.pack(fill="x")
@@ -350,6 +361,7 @@ class App:
             return
         try:
             for kind, data in self.bus.poll():
+                self.remote_hub.feed(kind, data)      # 镜像一份给手机端（不碰原队列）
                 if kind == "log":
                     self._append_log(data)
                 elif kind == "progress":
@@ -370,8 +382,88 @@ class App:
                     self._on_courses(data)
                 elif kind == "done":
                     self._on_task_done(data)
+            self._pump_remote()
         finally:
             self.root.after(110, self._poll_bus)
+
+    # ------------------------------------------------------ 手机远控（v1.9.0）
+    def _register_remote_actions(self):
+        """声明手机端允许发起的动作。
+
+        用白名单而不是「传方法名就调用」：这个端口在同一网段里可被扫描到，
+        只暴露下面这几个明确动作，避免变成通用的远程执行入口。
+        """
+        for name in ("scan", "brush", "read", "watch", "stop"):
+            self.remote_hub.handlers[name] = name
+
+    def _pump_remote(self):
+        """在主线程执行手机发来的动作。
+
+        HTTP 请求跑在工作线程里，而 tkinter 只能在主线程碰 —— 所以网页那边
+        只把动作塞进 hub.pending，由这里取出来执行。
+        """
+        for name, params in self.remote_hub.take_pending():
+            try:
+                self._remote_action(name, params)
+            except Exception as e:                      # noqa: BLE001
+                self._append_log({"time": "", "msg": f"手机指令执行失败：{e}",
+                                  "level": "error"})
+
+    def _remote_action(self, name, params):
+        params = params or {}
+        if name == "stop":
+            self.on_stop()
+            return
+        if self.runner.is_running():
+            self._append_log({"time": "", "msg": "手机发来的操作被忽略：任务正在运行",
+                              "level": "warn"})
+            return
+        plat = self.platform_var.get()
+        if name == "scan":
+            self.on_scan_courses()
+            return
+        course = (params.get("course") or self.course_var.get() or "").strip()
+        if name == "read":
+            self._run(lambda: self.runner.action_read_time(plat, course), nav="read")
+        elif name == "brush":
+            if not course:
+                self._append_log({"time": "", "msg": "手机上还没选课程", "level": "warn"})
+                return
+            self._append_log({"time": "", "msg": f"手机指令：刷《{course}》"})
+            self._run(lambda: self.runner.action_brush_course(plat, course, None),
+                      nav="brush")
+        elif name == "watch":
+            try:
+                hours = float(params.get("hours") or 2)
+            except (TypeError, ValueError):
+                hours = 2.0
+            hours = max(0.5, min(24.0, hours))
+            self._run(lambda: self.runner.action_watch_time(hours, 300, platform=plat),
+                      nav="watch")
+
+    def on_remote(self):
+        """打开「手机远控」窗口；第一次打开时顺手把服务起起来。"""
+        from ui.remote import RemoteDialog
+        existing = self._remote_dialog
+        if existing is not None:
+            try:
+                if existing.top.winfo_exists():
+                    existing.top.deiconify()
+                    existing.top.lift()
+                    existing.top.focus_force()
+                    return
+            except Exception:
+                pass
+        if not self.remote_server.running:
+            if not self.remote_server.start():
+                self._append_log({"time": "", "msg": self.remote_server.error,
+                                  "level": "error"})
+                messagebox.showwarning("手机远控", self.remote_server.error or
+                                       "服务启动失败，换个端口试试（环境变量 SB_REMOTE_PORT）。")
+                return
+            self._append_log({"time": "", "msg": f"手机远控已启动：{self.remote_server.url()}",
+                              "level": "ok"})
+        self._remote_dialog = RemoteDialog(self.root, self.remote_hub, self.remote_server)
 
     def _append_log(self, d):
         self.log.config(state="normal")
@@ -406,6 +498,23 @@ class App:
     def _on_finish(self):
         pass
 
+    def _flash_note(self, seconds=5):
+        """把「注意：…」那行临时改成红字提示，几秒后自动复原。"""
+        job = getattr(self, "_note_job", None)
+        if job:
+            try:
+                self.root.after_cancel(job)
+            except Exception:
+                pass
+
+        def restore():
+            plat = self.platform_var.get()
+            info = self.PLATFORM_INFO.get(plat, {})
+            self.note_label.config(text="注意：" + info.get("desc", ""), fg=W.TEXT_SUB)
+            self._note_job = None
+
+        self._note_job = self.root.after(int(seconds * 1000), restore)
+
     def _on_platform_change(self, key=None):
         """切换平台：刷新说明、隐藏不适用参数、加载该平台的课程缓存。
 
@@ -418,10 +527,14 @@ class App:
         current = self.platform_var.get()
         if key and key != current and self.runner.is_running():
             self.seg.set(current)                 # 高亮拨回去，别显示成已切换
+            # v1.9.1：这里原来还弹一个 messagebox。它是**模态**的，会把 tkinter
+            # 主循环整块堵住 —— 扫描正在后台跑，界面却点不动「停止」，弹窗还常常
+            # 被窗口边缘裁掉一半。改成纯界面内提示：红字 + 日志，不阻塞。
             self.note_label.config(text="请先停止任务再切换平台", fg=W.RED)
-            messagebox.showinfo("正在运行任务", "请先停止任务再切换平台。\n\n"
-                                              "扫描/刷课过程中切换平台，会让结果落到"
-                                              "另一个平台的课程列表里。")
+            self._append_log({"time": "", "level": "warn",
+                              "msg": "正在运行任务，已拦下切换平台。请先点「停止当前任务」，"
+                                     "否则扫描结果会落到另一个平台的列表里。"})
+            self._flash_note()
             return
         if key:
             self.platform_var.set(key)
@@ -657,6 +770,7 @@ class App:
 
     # ------------------------------------------------------------ 忙闲控制
     def _set_busy(self, busy):
+        self.remote_hub.set_running(busy)      # 手机端据此禁用除「停止」外的按钮
         state = "disabled" if busy else "normal"
         for b in self._nav.values():
             b.config(state=state)
@@ -744,7 +858,9 @@ class App:
             messagebox.showerror("参数错误", "目标时长与最长挂机需为数字")
             return
         platform = self.platform_var.get()
-        self._run(lambda: self.runner.action_watch_time(h, m, platform=platform),
+        course = (self.course_var.get() or "").strip()
+        self._run(lambda: self.runner.action_watch_time(h, m, platform=platform,
+                                                       course_name=course),
                   nav="watch")
 
     def on_verify(self):
@@ -792,7 +908,11 @@ class App:
         self._start_pump()
 
     def _shutdown_worker(self):
-        """后台收尾：停任务 → 关 Edge。UI 线程绝不碰 Playwright 对象。"""
+        """后台收尾：停远控服务 → 停任务 → 关 Edge。UI 线程绝不碰 Playwright 对象。"""
+        try:
+            self.remote_server.stop()      # 程序退出后手机就不该还能连上
+        except Exception:
+            pass
         try:
             self.runner.shutdown()
         except Exception:

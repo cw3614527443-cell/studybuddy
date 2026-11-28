@@ -460,7 +460,7 @@ class Browser:
             time.sleep(0.5)
         return False
 
-    def wait_course_tab(self, course_name, timeout=25):
+    def wait_course_tab(self, course_name, timeout=50):
         """等「刚点开的那个标签页」真的变成课程页。
 
         v1.8.0：AI 优课点课程卡片的跳转链是
@@ -468,6 +468,10 @@ class Browser:
         → `spoccourseZstp` → 点「教学内容」→ `spoccourseIndex`。
         以前只等 8 秒，正好卡在中间页上，于是账号里第一门课
         永远「检测失败，已跳过」。这里按课程名轮询，等它落地。
+
+        v1.9.1 修：真机实测首次加载中间页要 34 秒以上，25 秒超时会让
+        12 门课里 6 门误判「未确认」，连带读进度/刷课全读到 0 资源。
+        超时放宽到 50 秒；调用方可再覆盖。
         """
         t0 = time.time()
         fallback = None
